@@ -1,34 +1,37 @@
-const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys')
+const { default: makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys')
 const P = require('pino')
 
-async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState('auth')
+async function start() {
+  const { state, saveCreds } = await useMultiFileAuthState('./session')
   const sock = makeWASocket({
     logger: P({ level: 'silent' }),
-    auth: state,
-    browser: ["KARATINA-MD", "Chrome", "1.0"]
+    auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, P({ level: 'silent' })) },
+    browser: ["KARATINA-MD","Chrome","1.0"],
+    printQRInTerminal: true
   })
-
   sock.ev.on('creds.update', saveCreds)
 
-  sock.ev.on('messages.upsert', async (m) => {
-    const msg = m.messages[0]
-    if(!msg.message) return
-    const body = msg.message.conversation || msg.message.extendedTextMessage?.text
-    const from = msg.key.remoteJid
+  sock.ev.on('connection.update', async (u) => {
+    if(u.connection === 'open') console.log('KARATINA-MD CONNECTED ✅')
+  })
 
-    if(body === ".settings"){
-      let txt = `╭─── *KARATINA-MD SETTINGS* ───
-│.settings - This Menu
-│.autostatus on/off
-│.antidelete on/off
-│.anticall on/off
-│.autoreact on/off
-│.mode public/private
-╰───────────────────
-Owner: @ianjame658`
-      await sock.sendMessage(from, { text: txt })
+  sock.ev.on('messages.upsert', async ({messages}) => {
+    const m = messages[0]
+    if(!m.message) return
+    const text = m.message.conversation || m.message.extendedTextMessage?.text
+    const from = m.key.remoteJid
+    if(text === '.settings'){
+      await sock.sendMessage(from, {text: `╭─── KARATINA-MD ───\n│.settings\n│.ping\n│.alive\n╰──────────────\nBot by ianjame658`})
+    }
+    if(text === '.ping'){
+      await sock.sendMessage(from, {text: 'Pong! Karatina-MD active ✅'})
     }
   })
+
+  if(!sock.authState.creds.registered){
+    const num = process.env.PHONE || '254712345678'
+    const code = await sock.requestPairingCode(num.replace(/[^0-9]/g,''))
+    console.log('PAIRING CODE:', code)
+  }
 }
-startBot()
+start()
