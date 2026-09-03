@@ -31,3 +31,8 @@ async function startBot(){
   }
 }
 startBot()
+// Keep Render alive
+const express = require('express');
+const app = express();
+app.get('/', (req,res)=>res.send('KARATINA-MD Live ✅'));
+app.listen(process.env.PORT || 3000, ()=>console.log('Port live'));
