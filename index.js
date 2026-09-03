@@ -35,20 +35,25 @@ async function startBot() {
   })
 
   // Pairing code - waits 5 sec
-  if (!sock.authState.creds.registered) {
+  let codeRequested = false
+  if (!sock.authState.creds.registered && !codeRequested) {
     setTimeout(async () => {
+      if(codeRequested) return
+      codeRequested = true
       try {
         const phoneNumber = '254715068518'
         console.log('Requesting pairing code for:', phoneNumber)
         const code = await sock.requestPairingCode(phoneNumber)
         console.log('===========================')
-        console.log('YOUR PAIRING CODE:', code)
+        console.log('YOUR FINAL CODE:', code)
+        console.log('PAIR THIS CODE NOW IN WHATSAPP')
         console.log('===========================')
-        console.log('Go to WhatsApp > Linked Devices > Link with phone number')
       } catch (err) {
-        console.log('Failed to get pairing code:', err.message)
+        console.log('Pair error:', err.message)
+        codeRequested = false // allow retry after 20 sec
+        setTimeout(()=>{codeRequested=false},20000)
       }
-    }, 5000)
+    }, 8000)
   }
 
   // Commands
@@ -66,13 +71,13 @@ async function startBot() {
     }
     if (text.trim().toLowerCase() === '.settings' || text.trim().toLowerCase() === '.menu') {
       await sock.sendMessage(from, { text: `╭─── KARATINA-MD ───╮
-│ Owner: 254715068518
-│ Prefix:.
-│ Commands:
-│ •.ping - check bot
-│ •.alive - status
-│ •.settings - this menu
-╰────────────────╯` })
+ │ Owner: 254715068518
+ │ Prefix:.
+ │ Commands:
+ │ •.ping - check bot
+ │ •.alive - status
+ │ •.settings - this menu
+ ╰────────────────╯` })
     }
   })
 }
