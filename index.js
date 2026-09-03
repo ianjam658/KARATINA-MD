@@ -1,7 +1,14 @@
 const { default: makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, DisconnectReason } = require('@whiskeysockets/baileys')
 const P = require('pino')
+const express = require('express')
 
-async function start() {
+// Keep Render alive
+const app = express()
+app.get('/', (req, res) => res.send('<h1>KARATINA-MD is Live ✅</h1><p>Bot running for 254715068518</p>'))
+const PORT = process.env.PORT || 10000
+app.listen(PORT, () => console.log('Server running on ' + PORT))
+
+async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./session')
   const sock = makeWASocket({
     logger: P({ level: 'silent' }),
@@ -9,52 +16,65 @@ async function start() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, P({ level: 'silent' }))
     },
-    browser: ["KARATINA-MD","Chrome","1.0.0"]
+    browser: ["KARATINA-MD", "Chrome", "1.0.0"],
+    printQRInTerminal: false
   })
+
   sock.ev.on('creds.update', saveCreds)
 
-  sock.ev.on('connection.update', async (u) => {
-    const { connection, lastDisconnect } = u
-    if(connection === 'open') {
-      console.log('KARATINA-MD CONNECTED ✅ READY FOR COMMANDS')
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect } = update
+    if (connection === 'open') {
+      console.log('✅ KARATINA-MD CONNECTED - READY FOR 254715068518')
     }
-    if(connection === 'close') {
+    if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode!== DisconnectReason.loggedOut
-      if(shouldReconnect) start()
+      console.log('Connection closed, reconnecting...', shouldReconnect)
+      if (shouldReconnect) startBot()
     }
   })
 
-  // Wait 5 seconds then request pairing code
-  if(!sock.authState.creds.registered){
+  // Pairing code - waits 5 sec
+  if (!sock.authState.creds.registered) {
     setTimeout(async () => {
       try {
-        let phoneNumber = process.env.PHONE_NUMBER || '254797631263'
-        phoneNumber = phoneNumber.replace(/[^0-9]/g,'')
+        const phoneNumber = '254715068518'
+        console.log('Requesting pairing code for:', phoneNumber)
         const code = await sock.requestPairingCode(phoneNumber)
-        console.log('=============================')
-        console.log('PAIRING CODE:', code)
-        console.log('=============================')
+        console.log('===========================')
+        console.log('YOUR PAIRING CODE:', code)
+        console.log('===========================')
         console.log('Go to WhatsApp > Linked Devices > Link with phone number')
-      } catch(e){
-        console.log('Failed to get code, retrying...', e.message)
+      } catch (err) {
+        console.log('Failed to get pairing code:', err.message)
       }
     }, 5000)
   }
 
-  sock.ev.on('messages.upsert', async ({messages}) => {
+  // Commands
+  sock.ev.on('messages.upsert', async ({ messages }) => {
     const m = messages[0]
-    if(!m.message || m.key.fromMe) return
+    if (!m.message || m.key.fromMe) return
     const text = m.message.conversation || m.message.extendedTextMessage?.text || ""
     const from = m.key.remoteJid
-    if(text.trim() === '.settings'){
-      await sock.sendMessage(from, {text: `╭── KARATINA-MD ──╮\n│ Owner: Ian\n│.ping - check alive\n│.settings - menu\n│.alive - status\n╰──────────────╯`})
+
+    if (text.trim().toLowerCase() === '.ping') {
+      await sock.sendMessage(from, { text: 'Pong! Karatina-MD is active ⚡' })
     }
-    if(text.trim() === '.ping'){
-      await sock.sendMessage(from, {text: 'Pong! Karatina-MD is alive ✅'})
+    if (text.trim().toLowerCase() === '.alive') {
+      await sock.sendMessage(from, { text: 'KARATINA-MD is alive and running on Render for 254715068518 🚀' })
     }
-    if(text.trim() === '.alive'){
-      await sock.sendMessage(from, {text: 'KARATINA-MD is running on Render 🚀'})
+    if (text.trim().toLowerCase() === '.settings' || text.trim().toLowerCase() === '.menu') {
+      await sock.sendMessage(from, { text: `╭─── KARATINA-MD ───╮
+│ Owner: 254715068518
+│ Prefix:.
+│ Commands:
+│ •.ping - check bot
+│ •.alive - status
+│ •.settings - this menu
+╰────────────────╯` })
     }
   })
 }
-start()
+
+startBot()
