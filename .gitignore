@@ -1,3 +1,35 @@
-node_modules
-auth
-session
+# Dependencies
+node_modules/
+
+# WhatsApp authentication
+session/
+auth/
+
+# Subscription data
+subscriptions.json
+data/
+data/subscriptions.json
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+
+# npm
+.npm/
