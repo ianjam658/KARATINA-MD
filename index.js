@@ -1404,7 +1404,17 @@ function createBotSession({
       0,
 
     pairingRequested:
-      false
+      false,
+
+    // --------------------------------------------------
+    // AUTO REACTION
+    // --------------------------------------------------
+    // Enabled by default so existing behavior
+    // remains unchanged.
+    // --------------------------------------------------
+
+    autoReact:
+      true
   };
 
   sessions.set(
@@ -1675,7 +1685,11 @@ async function startBotSession(
               "📡 Status viewing: ENABLED"
             );
             console.log(
-              "❤️ Auto reactions: ENABLED"
+              `❤️ Auto reactions: ${
+                bot.autoReact
+                  ? "ENABLED"
+                  : "DISABLED"
+              }`
             );
             console.log(
               "========================================"
@@ -2013,6 +2027,7 @@ async function startBotSession(
                 // ------------------------------------------------
 
                 if (
+                  bot.autoReact &&
                   hasAccess(
                     getSenderTier(
                       bot.jid
@@ -2121,10 +2136,180 @@ async function startBotSession(
               );
 
               // ==================================================
+              // NO COMMAND
+              // ==================================================
+
+              if (!body) {
+                continue;
+              }
+
+              // ==================================================
+              // COMMAND
+              // ==================================================
+
+              const args =
+                body.split(/\s+/);
+
+              const command =
+                args
+                  .shift()
+                  .toLowerCase();
+
+              // ==================================================
+              // SET
+              // ==================================================
+
+              if (
+                command ===
+                `${config.prefix}set`
+              ) {
+
+                // ------------------------------------------------
+                // Only owner can change bot settings
+                // ------------------------------------------------
+
+                if (
+                  !isOwner(
+                    remoteJid
+                  )
+                ) {
+
+                  continue;
+                }
+
+                const setting =
+                  String(
+                    args[0] || ""
+                  )
+                    .toLowerCase();
+
+                const value =
+                  String(
+                    args[1] || ""
+                  )
+                    .toLowerCase();
+
+                // ------------------------------------------------
+                // AUTOREACT
+                // ------------------------------------------------
+
+                if (
+                  setting ===
+                  "autoreact"
+                ) {
+
+                  // ----------------------------------------------
+                  // No valid value
+                  // ----------------------------------------------
+
+                  if (
+                    value !== "true" &&
+                    value !== "false"
+                  ) {
+
+                    try {
+
+                      await safeSend(
+                        bot,
+                        remoteJid,
+                        {
+                          text:
+                            "⚙️ *Auto React Settings*\n\n" +
+                            `Current: ${
+                              bot.autoReact
+                                ? "ON ✅"
+                                : "OFF ❌"
+                            }\n\n` +
+                            "Use:\n" +
+                            `${config.prefix}set autoreact true\n` +
+                            `${config.prefix}set autoreact false`
+                        }
+                      );
+
+                    } catch (error) {
+
+                      console.error(
+                        `❌ [${bot.phone}] AutoReact settings message failed:`,
+                        error.message
+                      );
+                    }
+
+                    continue;
+                  }
+
+                  // ----------------------------------------------
+                  // Set value
+                  // ----------------------------------------------
+
+                  bot.autoReact =
+                    value === "true";
+
+                  try {
+
+                    await safeSend(
+                      bot,
+                      remoteJid,
+                      {
+                        text:
+                          bot.autoReact
+                            ? "❤️ *Auto React ENABLED* ✅\n\nThe bot will react to messages and statuses again."
+                            : "🔕 *Auto React DISABLED* ❌\n\nThe bot will no longer automatically react to messages or statuses."
+                      }
+                    );
+
+                  } catch (error) {
+
+                    console.error(
+                      `❌ [${bot.phone}] AutoReact update message failed:`,
+                      error.message
+                    );
+                  }
+
+                  console.log(
+                    `⚙️ [${bot.phone}] AutoReact: ${
+                      bot.autoReact
+                        ? "ON"
+                        : "OFF"
+                    }`
+                  );
+
+                  continue;
+                }
+
+                // ------------------------------------------------
+                // UNKNOWN SETTING
+                // ------------------------------------------------
+
+                try {
+
+                  await safeSend(
+                    bot,
+                    remoteJid,
+                    {
+                      text:
+                        "⚙️ *Available settings*\n\n" +
+                        `${config.prefix}set autoreact true\n` +
+                        `${config.prefix}set autoreact false`
+                    }
+                  );
+
+                } catch (error) {
+
+                  console.error(
+                    `❌ [${bot.phone}] Settings help failed:`,
+                    error.message
+                  );
+                }
+
+                continue;
+              }
+
+              // ==================================================
               // AUTO REACTION
               // ==================================================
 
               if (
+                bot.autoReact &&
                 hasAccess(
                   senderTier,
                   "reactToMessage"
@@ -2159,26 +2344,6 @@ async function startBotSession(
                   );
                 }
               }
-
-              // ==================================================
-              // NO COMMAND
-              // ==================================================
-
-              if (!body) {
-                continue;
-              }
-
-              // ==================================================
-              // COMMAND
-              // ==================================================
-
-              const args =
-                body.split(/\s+/);
-
-              const command =
-                args
-                  .shift()
-                  .toLowerCase();
 
               // ==================================================
               // PING
