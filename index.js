@@ -8,7 +8,15 @@ const {
 
 const P = require("pino");
 const express = require("express");
+const https = require("https");
+const crypto = require("crypto");
 const config = require("./config");
+const { TIERS, hasAccess } = require("./features");
+const { getTier, upgradeTier } = require("./subscription");
+
+// Where session + subscription data live. Set this to a mounted persistent
+// disk path (e.g. /var/data) on Render so it survives redeploys.
+const DATA_DIR = process.env.DATA_DIR || ".";
 
 // ======================================================
 // WEB SERVER - REQUIRED BY RENDER
@@ -16,6 +24,17 @@ const config = require("./config");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Needed for the Paystack webhook below. We capture the raw body too,
+// since signature verification must hash the exact bytes Paystack sent —
+// not a re-serialized version of the parsed JSON.
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    }
+  })
+);
 
 app.get("/", (req, res) => {
   res.status(200).send(`${config.botname} WhatsApp Bot is running ✅`);
@@ -29,9 +48,112 @@ app.get("/health", (req, res) => {
   });
 });
 
+// --------------------------------------------------
+// PAYSTACK WEBHOOK — upgrades a sender to PRO on successful payment
+// --------------------------------------------------
+
+app.post("/webhook/payment", (req, res) => {
+  const secret = process.env.PAYSTACK_SECRET_KEY;
+
+  if (!secret) {
+    console.warn("⚠️ PAYSTACK_SECRET_KEY not set — rejecting webhook.");
+    return res.sendStatus(401);
+  }
+
+  const signature = req.headers["x-paystack-signature"];
+  const expected = crypto
+    .createHmac("sha512", secret)
+    .update(req.rawBody)
+    .digest("hex");
+
+  if (!signature || signature !== expected) {
+    console.warn("⚠️ Rejected webhook: invalid signature.");
+    return res.sendStatus(401);
+  }
+
+  const event = req.body;
+
+  if (event.event === "charge.success") {
+    const phone = event.data?.metadata?.customer_phone;
+    const days = Number(event.data?.metadata?.plan_duration_days) || 30;
+
+    if (phone) {
+      const jid = `${phone}@s.whatsapp.net`;
+      upgradeTier(jid, TIERS.PRO, days);
+      console.log(`✅ Upgraded ${jid} to PRO for ${days} days`);
+    } else {
+      console.warn("⚠️ charge.success had no metadata.customer_phone — cannot upgrade anyone.");
+    }
+  }
+
+  res.sendStatus(200);
+});
+
 app.listen(PORT, () => {
   console.log(`🌐 Web server running on port ${PORT}`);
 });
+
+// ======================================================
+// PAYSTACK: create a payment link for a given WhatsApp sender
+// ======================================================
+
+function initializePaystackTransaction(phoneDigits) {
+  return new Promise((resolve, reject) => {
+    const secret = process.env.PAYSTACK_SECRET_KEY;
+
+    if (!secret) {
+      reject(new Error("PAYSTACK_SECRET_KEY is not set"));
+      return;
+    }
+
+    const priceKes = Number(process.env.PRICE_KES || 200);
+
+    const payload = JSON.stringify({
+      // Paystack requires an email even though our customers only have a
+      // phone number — a deterministic placeholder is fine since we key
+      // everything off metadata.customer_phone instead.
+      email: `${phoneDigits}@customers.${config.botname.toLowerCase().replace(/[^a-z0-9]/g, "")}.bot`,
+      amount: priceKes * 100, // Paystack expects the amount in kobo/cents
+      currency: "KES",
+      metadata: {
+        customer_phone: phoneDigits,
+        plan_duration_days: 30
+      }
+    });
+
+    const options = {
+      hostname: "api.paystack.co",
+      path: "/transaction/initialize",
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload)
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.status && parsed.data?.authorization_url) {
+            resolve(parsed.data.authorization_url);
+          } else {
+            reject(new Error(parsed.message || "Paystack did not return a payment link"));
+          }
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
 
 // ======================================================
 // LOGGER
@@ -90,7 +212,7 @@ async function startBot() {
     const {
       state,
       saveCreds
-    } = await useMultiFileAuthState("./session");
+    } = await useMultiFileAuthState(`${DATA_DIR}/session`);
 
     console.log(
       `🔐 Existing session: ${
@@ -343,7 +465,7 @@ async function startBot() {
             );
 
             console.log(
-              "🔗 Link with phone number instead"
+              "→ Link with phone number instead"
             );
 
             console.log(
@@ -408,12 +530,27 @@ async function startBot() {
 
           if (!msg.message) return;
 
-          if (msg.key?.fromMe) return;
-
           const remoteJid =
             msg.key?.remoteJid;
 
           if (!remoteJid) return;
+
+          // --------------------------------------------
+          // STATUS UPDATES — free tier, always on
+          // --------------------------------------------
+
+          if (remoteJid === "status@broadcast") {
+            const posterTier = getSenderTier(msg.key.participant || remoteJid);
+
+            if (hasAccess(posterTier, "viewStatus")) {
+              await socket.readMessages([msg.key]);
+              console.log(`👁️ Viewed status from ${msg.key.participant}`);
+            }
+
+            return;
+          }
+
+          if (msg.key?.fromMe) return;
 
           // --------------------------------------------
           // GET TEXT
@@ -432,9 +569,25 @@ async function startBot() {
 
           if (!body) return;
 
+          const senderTier = getSenderTier(remoteJid);
+
+          // --------------------------------------------
+          // VIEW MESSAGE — free tier, always on
+          // --------------------------------------------
+
           console.log(
-            `📩 Message received from ${remoteJid}: ${body}`
+            `📩 [${senderTier.toUpperCase()}] ${remoteJid}: ${body}`
           );
+
+          // --------------------------------------------
+          // REACT TO MESSAGE — free tier, always on
+          // --------------------------------------------
+
+          if (hasAccess(senderTier, "reactToMessage")) {
+            await socket.sendMessage(remoteJid, {
+              react: { text: "👀", key: msg.key }
+            });
+          }
 
           // --------------------------------------------
           // COMMAND
@@ -480,11 +633,15 @@ async function startBot() {
 `╭━━━〔 ${config.botname} 〕━━━╮
 ┃
 ┃ 👋 Hello!
+┃ 💳 Your plan: ${senderTier.toUpperCase()}
 ┃
-┃ 🤖 BOT COMMANDS
-┃
+┃ 🤖 FREE COMMANDS
 ┃ ${config.prefix}ping
 ┃ ${config.prefix}menu
+┃ ${config.prefix}upgrade
+┃
+┃ ⭐ PRO COMMANDS
+┃ ${config.prefix}quote
 ┃
 ╰━━━━━━━━━━━━━━━━━━━━╯`;
 
@@ -494,6 +651,74 @@ async function startBot() {
                 text: menu
               }
             );
+
+            return;
+          }
+
+          // --------------------------------------------
+          // UPGRADE — always free, this is how people pay
+          // --------------------------------------------
+
+          if (
+            command ===
+            `${config.prefix}upgrade`
+          ) {
+
+            if (senderTier === TIERS.PRO) {
+              await socket.sendMessage(remoteJid, {
+                text: "✅ You're already on the PRO plan. Thanks for your support!"
+              });
+              return;
+            }
+
+            try {
+              const phoneDigits = remoteJid.split("@")[0];
+              const link = await initializePaystackTransaction(phoneDigits);
+
+              await socket.sendMessage(remoteJid, {
+                text:
+                  `⭐ Upgrade to PRO — KES ${process.env.PRICE_KES || 200}/month\n\n` +
+                  `Pay here:\n${link}\n\n` +
+                  "You'll be upgraded automatically within a minute of payment."
+              });
+            } catch (error) {
+              console.error("❌ Upgrade link error:", error.message);
+
+              await socket.sendMessage(remoteJid, {
+                text: "⚠️ Payments aren't set up yet. Ask the bot owner to configure PAYSTACK_SECRET_KEY."
+              });
+            }
+
+            return;
+          }
+
+          // --------------------------------------------
+          // QUOTE — example PRO-only command
+          // --------------------------------------------
+
+          if (
+            command ===
+            `${config.prefix}quote`
+          ) {
+
+            if (!hasAccess(senderTier, "quote")) {
+              await socket.sendMessage(remoteJid, {
+                text: `🔒 This is a PRO command.\n\nType ${config.prefix}upgrade to unlock it.`
+              });
+              return;
+            }
+
+            const quotes = [
+              "The way to get started is to quit talking and begin doing. — Walt Disney",
+              "Success is not final, failure is not fatal. — Winston Churchill",
+              "Don't watch the clock; do what it does. Keep going. — Sam Levenson"
+            ];
+
+            const pick = quotes[Math.floor(Math.random() * quotes.length)];
+
+            await socket.sendMessage(remoteJid, {
+              text: `💬 ${pick}`
+            });
 
             return;
           }
@@ -542,6 +767,18 @@ async function startBot() {
 }
 
 // ======================================================
+// Owner always gets PRO — you shouldn't have to pay yourself
+// ======================================================
+
+function getSenderTier(jid) {
+  const phoneDigits = jid.split("@")[0];
+  if (phoneDigits === String(config.owner).replace(/\D/g, "")) {
+    return TIERS.PRO;
+  }
+  return getTier(jid);
+}
+
+// ======================================================
 // ERROR HANDLING
 // ======================================================
 
@@ -574,7 +811,7 @@ process.on(
 // ======================================================
 
 console.log("");
-console.log("🚀 CYPHER-X is starting...");
+console.log(`🚀 ${config.botname} is starting...`);
 console.log("");
 
 startBot();
