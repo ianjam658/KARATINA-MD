@@ -8,14 +8,57 @@ const {
 
 const P = require("pino");
 const express = require("express");
+const https = require("https");
+const crypto = require("crypto");
+const path = require("path");
+
 const config = require("./config");
+const {
+  TIERS,
+  hasAccess
+} = require("./features");
+
+const {
+  getTier,
+  getSubscription,
+  upgradeTier,
+  getRemainingDays
+} = require("./subscription");
 
 // ======================================================
-// WEB SERVER - REQUIRED BY RENDER
+// DATA DIRECTORY
+// ======================================================
+
+const DATA_DIR =
+  process.env.DATA_DIR || ".";
+
+const SESSION_DIR =
+  path.join(DATA_DIR, "session");
+
+// ======================================================
+// WEB SERVER
 // ======================================================
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+
+const PORT =
+  process.env.PORT || 3000;
+
+// ------------------------------------------------------
+// Paystack webhook needs the original request body.
+// ------------------------------------------------------
+
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    }
+  })
+);
+
+// ------------------------------------------------------
+// HOME
+// ------------------------------------------------------
 
 app.get("/", (req, res) => {
   res.status(200).send(
@@ -23,218 +66,572 @@ app.get("/", (req, res) => {
   );
 });
 
+// ------------------------------------------------------
+// HEALTH
+// ------------------------------------------------------
+
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "online",
     bot: config.botname,
-    uptime: Math.floor(process.uptime())
+    uptime: Math.floor(process.uptime()),
+    whatsapp:
+      socket && isConnected
+        ? "connected"
+        : "disconnected"
   });
 });
 
+// ======================================================
+// PAYSTACK WEBHOOK
+// ======================================================
+
+app.post(
+  "/webhook/payment",
+  (req, res) => {
+
+    try {
+
+      const secret =
+        process.env.PAYSTACK_SECRET_KEY;
+
+      if (!secret) {
+
+        console.warn(
+          "⚠️ PAYSTACK_SECRET_KEY is not configured."
+        );
+
+        return res.sendStatus(401);
+      }
+
+      const signature =
+        req.headers["x-paystack-signature"];
+
+      if (!signature || !req.rawBody) {
+
+        console.warn(
+          "⚠️ Paystack webhook missing signature/body."
+        );
+
+        return res.sendStatus(401);
+      }
+
+      const expected =
+        crypto
+          .createHmac("sha512", secret)
+          .update(req.rawBody)
+          .digest("hex");
+
+      if (
+        signature.length !== expected.length ||
+        !crypto.timingSafeEqual(
+          Buffer.from(signature),
+          Buffer.from(expected)
+        )
+      ) {
+
+        console.warn(
+          "⚠️ Invalid Paystack webhook signature."
+        );
+
+        return res.sendStatus(401);
+      }
+
+      const event =
+        req.body;
+
+      console.log(
+        `💳 Paystack event received: ${event?.event || "unknown"}`
+      );
+
+      // --------------------------------------------------
+      // SUCCESSFUL PAYMENT
+      // --------------------------------------------------
+
+      if (
+        event?.event ===
+        "charge.success"
+      ) {
+
+        const phone =
+          event?.data?.metadata?.customer_phone;
+
+        const days =
+          Number(
+            event?.data?.metadata?.plan_duration_days
+          ) || 30;
+
+        if (!phone) {
+
+          console.warn(
+            "⚠️ Payment has no customer_phone metadata."
+          );
+
+          return res.sendStatus(200);
+        }
+
+        const cleanPhone =
+          String(phone)
+            .replace(/\D/g, "");
+
+        if (!cleanPhone) {
+
+          console.warn(
+            "⚠️ Invalid customer phone in payment."
+          );
+
+          return res.sendStatus(200);
+        }
+
+        const jid =
+          `${cleanPhone}@s.whatsapp.net`;
+
+        try {
+
+          const result =
+            upgradeTier(
+              jid,
+              TIERS.PRO,
+              days
+            );
+
+          console.log("");
+          console.log(
+            "========================================"
+          );
+          console.log(
+            "💳 PAYMENT SUCCESSFUL"
+          );
+          console.log(
+            "========================================"
+          );
+          console.log(
+            `📞 Customer: ${cleanPhone}`
+          );
+          console.log(
+            `⭐ Tier: ${result.tier}`
+          );
+          console.log(
+            `📅 Days: ${days}`
+          );
+          console.log(
+            `⏰ Expires: ${new Date(
+              result.expiresAt
+            ).toISOString()}`
+          );
+          console.log(
+            "========================================"
+          );
+
+          // ------------------------------------------------
+          // Notify customer if bot is connected
+          // ------------------------------------------------
+
+          if (
+            socket &&
+            isConnected
+          ) {
+
+            try {
+
+              awaitSafeSendMessage(
+                jid,
+                {
+                  text:
+                    "🎉 *PAYMENT SUCCESSFUL!*\n\n" +
+                    `⭐ You are now on the PRO plan.\n` +
+                    `📅 Duration: ${days} days.\n\n` +
+                    `Try ${config.prefix}quote now! 🚀`
+                }
+              );
+
+            } catch (error) {
+
+              console.warn(
+                "⚠️ Could not send payment confirmation:",
+                error.message
+              );
+
+            }
+          }
+
+        } catch (error) {
+
+          console.error(
+            "❌ Subscription upgrade failed:",
+            error.message
+          );
+        }
+      }
+
+      return res.sendStatus(200);
+
+    } catch (error) {
+
+      console.error(
+        "❌ Paystack webhook error:",
+        error.message
+      );
+
+      return res.sendStatus(500);
+    }
+  }
+);
+
+// ======================================================
+// START WEB SERVER
+// ======================================================
+
 app.listen(PORT, () => {
-  console.log(`🌐 Web server running on port ${PORT}`);
+
+  console.log(
+    `🌐 Web server running on port ${PORT}`
+  );
+
 });
 
 // ======================================================
 // LOGGER
 // ======================================================
 
-const logger = P({
-  level: "silent"
-});
-
-// ======================================================
-// SETTINGS
-// ======================================================
-
-// Normal message reactions
-const MESSAGE_REACTIONS = [
-  "😂",
-  "❤️",
-  "🔥",
-  "👍",
-  "😮",
-  "😎",
-  "👀",
-  "🤣",
-  "💯"
-];
-
-// Status reactions
-const STATUS_REACTIONS = [
-  "❤️",
-  "🔥",
-  "😂",
-  "😍",
-  "😮",
-  "👍",
-  "💯",
-  "👀"
-];
+const logger =
+  P({
+    level: "silent"
+  });
 
 // ======================================================
 // BOT STATE
 // ======================================================
 
 let reconnectAttempts = 0;
+
 let starting = false;
+
 let pairingRequested = false;
+
 let socket = null;
+
+let isConnected = false;
+
+// ======================================================
+// REACTION LIST
+// ======================================================
+
+const REACTIONS = [
+  "👀",
+  "🔥",
+  "❤️",
+  "😂",
+  "👍",
+  "😎",
+  "💯",
+  "🤖",
+  "✨",
+  "🙌",
+  "😮",
+  "👏"
+];
 
 // ======================================================
 // RANDOM REACTION
 // ======================================================
 
-function getRandomReaction(list) {
-  return list[
-    Math.floor(Math.random() * list.length)
+function getRandomReaction() {
+
+  return REACTIONS[
+    Math.floor(
+      Math.random() *
+      REACTIONS.length
+    )
   ];
 }
 
 // ======================================================
-// NORMAL MESSAGE REACTION
+// SAFE MESSAGE SENDER
 // ======================================================
 
-async function reactToMessage(msg) {
-  try {
-    if (!socket) return;
+async function awaitSafeSendMessage(
+  jid,
+  content
+) {
 
-    const jid = msg.key?.remoteJid;
+  if (!socket) {
 
-    if (!jid) return;
-
-    const reaction = getRandomReaction(
-      MESSAGE_REACTIONS
-    );
-
-    await socket.sendMessage(jid, {
-      react: {
-        text: reaction,
-        key: msg.key
-      }
-    });
-
-    console.log(
-      `❤️ Reacted to message with ${reaction}`
-    );
-
-  } catch (error) {
-    console.error(
-      "❌ Message reaction error:",
-      error.message
+    throw new Error(
+      "WhatsApp socket is not available."
     );
   }
+
+  if (!isConnected) {
+
+    throw new Error(
+      "WhatsApp is not connected."
+    );
+  }
+
+  return socket.sendMessage(
+    jid,
+    content
+  );
 }
 
 // ======================================================
-// VIEW STATUS
+// PHONE NORMALIZATION
 // ======================================================
 
-async function viewStatus(msg) {
-  try {
-    if (!socket) return;
+function getPhoneNumber() {
 
-    await socket.readMessages([
-      msg.key
-    ]);
+  const phone =
+    String(config.owner || "")
+      .replace(/\D/g, "");
 
-    console.log(
-      `👁️ Status viewed from ${
-        msg.key?.participant || "unknown"
-      }`
-    );
+  if (!phone) {
 
-  } catch (error) {
-    console.error(
-      "❌ Status view error:",
-      error.message
+    throw new Error(
+      "config.owner does not contain a valid phone number."
     );
   }
+
+  return phone;
 }
 
 // ======================================================
-// REACT TO STATUS
+// OWNER CHECK
 // ======================================================
 
-async function reactToStatus(msg) {
+function isOwner(jid) {
+
+  if (!jid) return false;
+
+  const phone =
+    String(jid)
+      .split("@")[0]
+      .replace(/\D/g, "");
+
+  const owner =
+    getPhoneNumber();
+
+  return phone === owner;
+}
+
+// ======================================================
+// GET SENDER TIER
+// ======================================================
+
+function getSenderTier(jid) {
+
   try {
-    if (!socket) return;
 
-    const participant =
-      msg.key?.participant;
-
-    if (!participant) {
-      console.log(
-        "⚠️ Could not determine status owner."
-      );
-      return;
+    if (isOwner(jid)) {
+      return TIERS.PRO;
     }
 
-    const reaction = getRandomReaction(
-      STATUS_REACTIONS
-    );
-
-    /*
-     * Status reactions use the status message key.
-     * Baileys/WhatsApp may reject this depending on
-     * the current WhatsApp Web protocol version.
-     *
-     * The error is caught deliberately so the bot
-     * continues operating if WhatsApp rejects it.
-     */
-
-    await socket.sendMessage(
-      "status@broadcast",
-      {
-        react: {
-          text: reaction,
-          key: msg.key
-        }
-      }
-    );
-
-    console.log(
-      `❤️ Reacted to status from ${participant} with ${reaction}`
-    );
+    return getTier(jid);
 
   } catch (error) {
+
     console.error(
-      `❌ Status reaction error: ${error.message}`
+      "❌ Failed to get sender tier:",
+      error.message
     );
+
+    return TIERS.FREE;
   }
 }
 
 // ======================================================
-// HANDLE STATUS
+// PAYSTACK TRANSACTION
 // ======================================================
 
-async function handleStatus(msg) {
-  console.log("");
-  console.log(
-    "📱 ========================================"
-  );
-  console.log("📱 NEW WHATSAPP STATUS");
-  console.log(
-    `📱 From: ${msg.key?.participant || "unknown"}`
-  );
-  console.log(
-    "📱 ========================================"
-  );
+function initializePaystackTransaction(
+  phoneDigits
+) {
 
-  // ----------------------------------------------
-  // VIEW STATUS
-  // ----------------------------------------------
+  return new Promise(
+    (resolve, reject) => {
 
-  await viewStatus(msg);
+      const secret =
+        process.env.PAYSTACK_SECRET_KEY;
 
-  // ----------------------------------------------
-  // REACT TO STATUS
-  // ----------------------------------------------
+      if (!secret) {
 
-  await reactToStatus(msg);
+        reject(
+          new Error(
+            "PAYSTACK_SECRET_KEY is not configured."
+          )
+        );
 
-  console.log(
-    "📱 ========================================\n"
+        return;
+      }
+
+      const priceKes =
+        Number(
+          process.env.PRICE_KES || 200
+        );
+
+      if (
+        !Number.isFinite(priceKes) ||
+        priceKes <= 0
+      ) {
+
+        reject(
+          new Error(
+            "PRICE_KES is invalid."
+          )
+        );
+
+        return;
+      }
+
+      const cleanPhone =
+        String(phoneDigits)
+          .replace(/\D/g, "");
+
+      if (!cleanPhone) {
+
+        reject(
+          new Error(
+            "Invalid customer phone number."
+          )
+        );
+
+        return;
+      }
+
+      const safeBotName =
+        String(config.botname)
+          .toLowerCase()
+          .replace(
+            /[^a-z0-9]/g,
+            ""
+          );
+
+      const payload =
+        JSON.stringify({
+
+          email:
+            `${cleanPhone}@${safeBotName}.bot`,
+
+          amount:
+            Math.round(
+              priceKes * 100
+            ),
+
+          currency: "KES",
+
+          metadata: {
+
+            customer_phone:
+              cleanPhone,
+
+            plan_duration_days: 30
+          }
+
+        });
+
+      const options = {
+
+        hostname:
+          "api.paystack.co",
+
+        path:
+          "/transaction/initialize",
+
+        method:
+          "POST",
+
+        headers: {
+
+          Authorization:
+            `Bearer ${secret}`,
+
+          "Content-Type":
+            "application/json",
+
+          "Content-Length":
+            Buffer.byteLength(
+              payload
+            )
+        }
+      };
+
+      const request =
+        https.request(
+          options,
+          response => {
+
+            let data = "";
+
+            response.on(
+              "data",
+              chunk => {
+                data += chunk;
+              }
+            );
+
+            response.on(
+              "end",
+              () => {
+
+                try {
+
+                  const parsed =
+                    JSON.parse(data);
+
+                  if (
+                    parsed.status &&
+                    parsed.data?.authorization_url
+                  ) {
+
+                    resolve(
+                      parsed.data.authorization_url
+                    );
+
+                    return;
+                  }
+
+                  reject(
+                    new Error(
+                      parsed.message ||
+                      "Paystack did not return a payment link."
+                    )
+                  );
+
+                } catch (error) {
+
+                  reject(error);
+                }
+              }
+            );
+          }
+        );
+
+      request.on(
+        "error",
+        reject
+      );
+
+      request.setTimeout(
+        20000,
+        () => {
+
+          request.destroy();
+
+          reject(
+            new Error(
+              "Paystack request timed out."
+            )
+          );
+
+        }
+      );
+
+      request.write(
+        payload
+      );
+
+      request.end();
+    }
   );
 }
 
@@ -245,9 +642,11 @@ async function handleStatus(msg) {
 async function startBot() {
 
   if (starting) {
+
     console.log(
       "⚠️ Bot is already starting."
     );
+
     return;
   }
 
@@ -266,14 +665,23 @@ async function startBot() {
       "========================================"
     );
 
+    console.log(
+      `📂 Session directory: ${SESSION_DIR}`
+    );
+
+    console.log(
+      `📞 Pairing number: ${getPhoneNumber()}`
+    );
+
     // ==================================================
-    // WHATSAPP WEB VERSION
+    // WHATSAPP VERSION
     // ==================================================
 
     const {
       version,
       isLatest
-    } = await fetchLatestBaileysVersion();
+    } =
+      await fetchLatestBaileysVersion();
 
     console.log(
       `📱 WhatsApp Web version: ${version.join(".")}`
@@ -281,20 +689,23 @@ async function startBot() {
 
     console.log(
       `📌 Latest version: ${
-        isLatest ? "YES" : "NO"
+        isLatest
+          ? "YES"
+          : "NO"
       }`
     );
 
     // ==================================================
-    // LOAD SESSION
+    // AUTH STATE
     // ==================================================
 
     const {
       state,
       saveCreds
-    } = await useMultiFileAuthState(
-      "./session"
-    );
+    } =
+      await useMultiFileAuthState(
+        SESSION_DIR
+      );
 
     console.log(
       `🔐 Existing session: ${
@@ -308,35 +719,53 @@ async function startBot() {
     // CREATE SOCKET
     // ==================================================
 
-    socket = makeWASocket({
+    socket =
+      makeWASocket({
 
-      version,
+        version,
 
-      logger,
+        logger,
 
-      auth: {
-        creds: state.creds,
+        auth: {
 
-        keys: makeCacheableSignalKeyStore(
-          state.keys,
-          logger
-        )
-      },
+          creds:
+            state.creds,
 
-      // QR pairing is NOT enabled.
-      browser: [
-        "Ubuntu",
-        "Chrome",
-        "120.0.0"
-      ],
+          keys:
+            makeCacheableSignalKeyStore(
+              state.keys,
+              logger
+            )
+        },
 
-      markOnlineOnConnect: false,
+        // QR is NOT requested by this code.
+        browser: [
+          "Ubuntu",
+          "Chrome",
+          "120.0.0"
+        ],
 
-      generateHighQualityLinkPreview: true,
+        markOnlineOnConnect:
+          false,
 
-      syncFullHistory: false
+        generateHighQualityLinkPreview:
+          true,
 
-    });
+        syncFullHistory:
+          false,
+
+        connectTimeoutMs:
+          60000,
+
+        defaultQueryTimeoutMs:
+          60000,
+
+        keepAliveIntervalMs:
+          30000,
+
+        retryRequestDelayMs:
+          2000
+      });
 
     // ==================================================
     // SAVE CREDENTIALS
@@ -344,16 +773,30 @@ async function startBot() {
 
     socket.ev.on(
       "creds.update",
-      saveCreds
+      async () => {
+
+        try {
+
+          await saveCreds();
+
+        } catch (error) {
+
+          console.error(
+            "❌ Failed to save WhatsApp credentials:",
+            error.message
+          );
+
+        }
+      }
     );
 
     // ==================================================
-    // CONNECTION UPDATE
+    // CONNECTION EVENTS
     // ==================================================
 
     socket.ev.on(
       "connection.update",
-      async (update) => {
+      async update => {
 
         try {
 
@@ -367,7 +810,8 @@ async function startBot() {
           // --------------------------------------------
 
           if (
-            connection === "connecting"
+            connection ===
+            "connecting"
           ) {
 
             console.log(
@@ -381,11 +825,16 @@ async function startBot() {
           // --------------------------------------------
 
           if (
-            connection === "open"
+            connection ===
+            "open"
           ) {
 
             starting = false;
+
+            isConnected = true;
+
             reconnectAttempts = 0;
+
             pairingRequested = true;
 
             console.log("");
@@ -402,6 +851,12 @@ async function startBot() {
               `👑 Owner: ${config.ownername}`
             );
             console.log(
+              "📡 Status viewing: ENABLED"
+            );
+            console.log(
+              "❤️ Auto reactions: ENABLED"
+            );
+            console.log(
               "========================================"
             );
             console.log("");
@@ -413,10 +868,13 @@ async function startBot() {
           // --------------------------------------------
 
           if (
-            connection === "close"
+            connection ===
+            "close"
           ) {
 
             starting = false;
+
+            isConnected = false;
 
             const statusCode =
               lastDisconnect
@@ -428,7 +886,7 @@ async function startBot() {
               lastDisconnect
                 ?.error
                 ?.message ||
-              "Unknown error";
+              "Unknown connection error.";
 
             console.log("");
             console.log(
@@ -439,7 +897,8 @@ async function startBot() {
             );
             console.log(
               `📛 Status code: ${
-                statusCode || "unknown"
+                statusCode ||
+                "unknown"
               }`
             );
             console.log(
@@ -470,26 +929,6 @@ async function startBot() {
             }
 
             // ------------------------------------------
-            // CONNECTION REPLACED
-            // ------------------------------------------
-
-            if (
-              statusCode ===
-              DisconnectReason.connectionReplaced
-            ) {
-
-              console.log(
-                "⚠️ WhatsApp session was replaced."
-              );
-
-              console.log(
-                "🚫 Automatic reconnect stopped."
-              );
-
-              return;
-            }
-
-            // ------------------------------------------
             // BAD SESSION
             // ------------------------------------------
 
@@ -510,15 +949,37 @@ async function startBot() {
             }
 
             // ------------------------------------------
+            // CONNECTION REPLACED
+            // ------------------------------------------
+
+            if (
+              statusCode ===
+              DisconnectReason.connectionReplaced
+            ) {
+
+              console.log(
+                "⚠️ Another connection replaced this session."
+              );
+
+              console.log(
+                "🚫 Automatic reconnect stopped."
+              );
+
+              return;
+            }
+
+            // ------------------------------------------
             // RECONNECT
             // ------------------------------------------
 
             reconnectAttempts++;
 
-            const delay = Math.min(
-              5000 * reconnectAttempts,
-              60000
-            );
+            const delay =
+              Math.min(
+                5000 *
+                reconnectAttempts,
+                60000
+              );
 
             console.log(
               `🔁 Reconnecting in ${
@@ -526,16 +987,28 @@ async function startBot() {
               } seconds...`
             );
 
-            setTimeout(() => {
-              startBot();
-            }, delay);
+            setTimeout(
+              () => {
 
+                startBot()
+                  .catch(error => {
+
+                    console.error(
+                      "❌ Reconnect failed:",
+                      error.message
+                    );
+
+                  });
+
+              },
+              delay
+            );
           }
 
         } catch (error) {
 
           console.error(
-            "❌ Connection event error:",
+            "❌ Connection event handler error:",
             error.message
           );
 
@@ -548,7 +1021,9 @@ async function startBot() {
     // PHONE NUMBER PAIRING
     // ==================================================
 
-    if (!state.creds.registered) {
+    if (
+      !state.creds.registered
+    ) {
 
       console.log("");
       console.log(
@@ -560,16 +1035,16 @@ async function startBot() {
       console.log(
         "========================================"
       );
-
       console.log(
-        `📞 Number: ${config.owner}`
+        `📞 Number: ${getPhoneNumber()}`
       );
-
       console.log(
         "🔐 QR pairing is disabled."
       );
 
-      if (!pairingRequested) {
+      if (
+        !pairingRequested
+      ) {
 
         pairingRequested = true;
 
@@ -578,16 +1053,11 @@ async function startBot() {
 
             try {
 
-              const phoneNumber =
-                String(config.owner)
-                  .replace(/\D/g, "");
-
-              if (!phoneNumber) {
-
-                throw new Error(
-                  "Owner phone number is missing from config.js"
-                );
-
+              if (
+                !socket ||
+                isConnected
+              ) {
+                return;
               }
 
               console.log(
@@ -596,7 +1066,7 @@ async function startBot() {
 
               const code =
                 await socket.requestPairingCode(
-                  phoneNumber
+                  getPhoneNumber()
                 );
 
               console.log("");
@@ -638,6 +1108,15 @@ async function startBot() {
               );
 
               console.log("");
+              console.log(
+                "⚠️ This bot generates ONE code only."
+              );
+
+              console.log(
+                "⚠️ Do not wait for another code."
+              );
+
+              console.log("");
 
             } catch (error) {
 
@@ -657,12 +1136,14 @@ async function startBot() {
     }
 
     // ==================================================
-    // MESSAGE HANDLER
+    // STATUS VIEWING
     // ==================================================
 
     socket.ev.on(
       "messages.upsert",
-      async ({ messages }) => {
+      async ({
+        messages
+      }) => {
 
         try {
 
@@ -672,170 +1153,350 @@ async function startBot() {
             return;
           }
 
-          // Handle every message received
-          // instead of only messages[0].
           for (
             const msg of messages
           ) {
 
-            try {
+            if (!msg) {
+              continue;
+            }
 
-              if (!msg) continue;
+            const remoteJid =
+              msg.key?.remoteJid;
 
-              if (!msg.message) continue;
+            // ------------------------------------------
+            // STATUS
+            // ------------------------------------------
 
-              // ----------------------------------------
-              // STATUS
-              // ----------------------------------------
+            if (
+              remoteJid ===
+              "status@broadcast"
+            ) {
 
-              if (
-                msg.key?.remoteJid ===
-                "status@broadcast"
-              ) {
+              const poster =
+                msg.key?.participant;
 
-                await handleStatus(msg);
-
+              if (!poster) {
                 continue;
               }
 
-              // ----------------------------------------
-              // IGNORE OWN MESSAGES
-              // ----------------------------------------
+              try {
 
-              if (
-                msg.key?.fromMe
-              ) {
-                continue;
+                await socket.readMessages([
+                  msg.key
+                ]);
+
+                console.log(
+                  `👁️ Viewed status from ${poster}`
+                );
+
+              } catch (error) {
+
+                console.warn(
+                  `⚠️ Could not view status from ${poster}: ${error.message}`
+                );
+
               }
 
-              const remoteJid =
-                msg.key?.remoteJid;
+              // ------------------------------------------------
+              // React to the status
+              // ------------------------------------------------
 
-              if (!remoteJid) {
-                continue;
+              try {
+
+                const reaction =
+                  getRandomReaction();
+
+                await socket.sendMessage(
+                  "status@broadcast",
+                  {
+                    react: {
+                      text: reaction,
+                      key: msg.key
+                    }
+                  }
+                );
+
+                console.log(
+                  `❤️ Reacted ${reaction} to status from ${poster}`
+                );
+
+              } catch (error) {
+
+                console.warn(
+                  `⚠️ Status reaction failed: ${error.message}`
+                );
+
               }
 
-              // ----------------------------------------
-              // NORMAL MESSAGE REACTION
-              // ----------------------------------------
+              continue;
+            }
 
-              await reactToMessage(msg);
+            // ------------------------------------------
+            // NORMAL MESSAGES
+            // ------------------------------------------
 
-              // ----------------------------------------
-              // GET TEXT
-              // ----------------------------------------
+            if (
+              !msg.message
+            ) {
+              continue;
+            }
 
-              const text =
-                msg.message
-                  ?.conversation ||
+            if (
+              msg.key?.fromMe
+            ) {
+              continue;
+            }
 
-                msg.message
-                  ?.extendedTextMessage
-                  ?.text ||
+            if (!remoteJid) {
+              continue;
+            }
 
-                msg.message
-                  ?.imageMessage
-                  ?.caption ||
+            // Ignore broadcasts/newsletters
+            if (
+              remoteJid.endsWith(
+                "@broadcast"
+              ) ||
+              remoteJid.endsWith(
+                "@newsletter"
+              )
+            ) {
+              continue;
+            }
 
-                msg.message
-                  ?.videoMessage
-                  ?.caption ||
+            // ------------------------------------------
+            // TEXT
+            // ------------------------------------------
 
-                "";
+            const text =
+              msg.message
+                .conversation ||
 
-              if (!text) {
-                continue;
-              }
+              msg.message
+                .extendedTextMessage
+                ?.text ||
 
-              const body =
-                text.trim();
+              msg.message
+                .imageMessage
+                ?.caption ||
 
-              if (!body) {
-                continue;
-              }
+              msg.message
+                .videoMessage
+                ?.caption ||
 
-              console.log(
-                `📩 Message received from ${remoteJid}: ${body}`
+              "";
+
+            const body =
+              String(text)
+                .trim();
+
+            // ------------------------------------------
+            // MESSAGE LOG
+            // ------------------------------------------
+
+            const senderTier =
+              getSenderTier(
+                remoteJid
               );
 
-              // ----------------------------------------
-              // COMMAND ARGUMENTS
-              // ----------------------------------------
+            console.log(
+              `📩 [${senderTier.toUpperCase()}] ${remoteJid}: ${
+                body || "[non-text message]"
+              }`
+            );
 
-              const args =
-                body.split(/\s+/);
+            // ------------------------------------------
+            // AUTO REACTION
+            // ------------------------------------------
 
-              const command =
-                args
-                  .shift()
-                  .toLowerCase();
+            if (
+              hasAccess(
+                senderTier,
+                "reactToMessage"
+              )
+            ) {
 
-              // ----------------------------------------
-              // PING
-              // ----------------------------------------
+              try {
+
+                const reaction =
+                  getRandomReaction();
+
+                await socket.sendMessage(
+                  remoteJid,
+                  {
+                    react: {
+                      text: reaction,
+                      key: msg.key
+                    }
+                  }
+                );
+
+                console.log(
+                  `❤️ Reacted ${reaction} to ${remoteJid}`
+                );
+
+              } catch (error) {
+
+                console.warn(
+                  "⚠️ Message reaction failed:",
+                  error.message
+                );
+
+              }
+            }
+
+            // No command
+            if (!body) {
+              continue;
+            }
+
+            // ------------------------------------------
+            // COMMAND
+            // ------------------------------------------
+
+            const args =
+              body.split(/\s+/);
+
+            const command =
+              args
+                .shift()
+                .toLowerCase();
+
+            // ==================================================
+            // PING
+            // ==================================================
+
+            if (
+              command ===
+              `${config.prefix}ping`
+            ) {
 
               if (
-                command ===
-                `${config.prefix}ping`
+                !hasAccess(
+                  senderTier,
+                  "ping"
+                )
               ) {
-
-                try {
-
-                  await socket.sendMessage(
-                    remoteJid,
-                    {
-                      text:
-                        "🏓 Pong!\n\n" +
-                        `🤖 ${config.botname} is online ✅`
-                    }
-                  );
-
-                } catch (error) {
-
-                  console.error(
-                    "❌ Ping reply error:",
-                    error.message
-                  );
-
-                }
-
                 continue;
               }
 
-              // ----------------------------------------
-              // MENU
-              // ----------------------------------------
+              try {
+
+                await awaitSafeSendMessage(
+                  remoteJid,
+                  {
+                    text:
+                      "🏓 Pong!\n\n" +
+                      `🤖 ${config.botname} is online ✅`
+                  }
+                );
+
+              } catch (error) {
+
+                console.error(
+                  "❌ Ping reply failed:",
+                  error.message
+                );
+
+              }
+
+              continue;
+            }
+
+            // ==================================================
+            // MENU
+            // ==================================================
+
+            if (
+              command ===
+              `${config.prefix}menu`
+            ) {
 
               if (
-                command ===
-                `${config.prefix}menu`
+                !hasAccess(
+                  senderTier,
+                  "menu"
+                )
               ) {
+                continue;
+              }
 
-                const menu =
+              const menu =
 `╭━━━〔 ${config.botname} 〕━━━╮
 ┃
 ┃ 👋 Hello!
 ┃
-┃ 🤖 BOT COMMANDS
+┃ 👤 Plan: ${senderTier.toUpperCase()}
 ┃
+┃ 🤖 FREE
 ┃ ${config.prefix}ping
 ┃ ${config.prefix}menu
+┃ ${config.prefix}upgrade
+┃
+┃ ⭐ PRO
+┃ ${config.prefix}quote
 ┃
 ╰━━━━━━━━━━━━━━━━━━━━╯`;
 
+              try {
+
+                await awaitSafeSendMessage(
+                  remoteJid,
+                  {
+                    text: menu
+                  }
+                );
+
+              } catch (error) {
+
+                console.error(
+                  "❌ Menu reply failed:",
+                  error.message
+                );
+
+              }
+
+              continue;
+            }
+
+            // ==================================================
+            // UPGRADE
+            // ==================================================
+
+            if (
+              command ===
+              `${config.prefix}upgrade`
+            ) {
+
+              if (
+                !hasAccess(
+                  senderTier,
+                  "upgrade"
+                )
+              ) {
+                continue;
+              }
+
+              // Owner is already PRO
+              if (
+                isOwner(remoteJid)
+              ) {
+
                 try {
 
-                  await socket.sendMessage(
+                  await awaitSafeSendMessage(
                     remoteJid,
                     {
-                      text: menu
+                      text:
+                        "👑 You are the bot owner.\n\n" +
+                        "⭐ Your account already has PRO access."
                     }
                   );
 
                 } catch (error) {
 
                   console.error(
-                    "❌ Menu reply error:",
+                    "❌ Owner upgrade message failed:",
                     error.message
                   );
 
@@ -844,24 +1505,191 @@ async function startBot() {
                 continue;
               }
 
-            } catch (messageError) {
+              // Already PRO
+              if (
+                senderTier ===
+                TIERS.PRO
+              ) {
 
-              console.error(
-                "❌ Individual message error:",
-                messageError.message
-              );
+                const days =
+                  getRemainingDays(
+                    remoteJid
+                  );
 
-              // Important:
-              // One bad message must NOT stop
-              // the rest of the messages.
+                try {
+
+                  await awaitSafeSendMessage(
+                    remoteJid,
+                    {
+                      text:
+                        "⭐ You already have PRO access!\n\n" +
+                        `⏳ Remaining: ${days} day(s).`
+                    }
+                  );
+
+                } catch (error) {
+
+                  console.error(
+                    "❌ PRO status message failed:",
+                    error.message
+                  );
+
+                }
+
+                continue;
+              }
+
+              try {
+
+                const phoneDigits =
+                  remoteJid
+                    .split("@")[0]
+                    .replace(/\D/g, "");
+
+                const link =
+                  await initializePaystackTransaction(
+                    phoneDigits
+                  );
+
+                const price =
+                  process.env.PRICE_KES ||
+                  200;
+
+                await awaitSafeSendMessage(
+                  remoteJid,
+                  {
+                    text:
+                      `⭐ *CYPHER-X PRO*\n\n` +
+                      `💰 Price: KES ${price}/month\n\n` +
+                      `🔗 Pay here:\n${link}\n\n` +
+                      "✅ After successful payment, your PRO access will be activated automatically.\n\n" +
+                      `Then try ${config.prefix}quote 🚀`
+                  }
+                );
+
+              } catch (error) {
+
+                console.error(
+                  "❌ Upgrade error:",
+                  error.message
+                );
+
+                try {
+
+                  await awaitSafeSendMessage(
+                    remoteJid,
+                    {
+                      text:
+                        "⚠️ Payment is not configured yet.\n\n" +
+                        "The bot owner needs to configure PAYSTACK_SECRET_KEY."
+                    }
+                  );
+
+                } catch (sendError) {
+
+                  console.error(
+                    "❌ Could not send payment error:",
+                    sendError.message
+                  );
+
+                }
+              }
+
               continue;
             }
+
+            // ==================================================
+            // QUOTE
+            // ==================================================
+
+            if (
+              command ===
+              `${config.prefix}quote`
+            ) {
+
+              if (
+                !hasAccess(
+                  senderTier,
+                  "quote"
+                )
+              ) {
+
+                try {
+
+                  await awaitSafeSendMessage(
+                    remoteJid,
+                    {
+                      text:
+                        "🔒 *PRO FEATURE*\n\n" +
+                        `⭐ ${config.prefix}upgrade to unlock ${config.prefix}quote.`
+                    }
+                  );
+
+                } catch (error) {
+
+                  console.error(
+                    "❌ Quote access message failed:",
+                    error.message
+                  );
+
+                }
+
+                continue;
+              }
+
+              const quotes = [
+
+                "The way to get started is to quit talking and begin doing. — Walt Disney",
+
+                "Success is not final, failure is not fatal. — Winston Churchill",
+
+                "Don't watch the clock; do what it does. Keep going. — Sam Levenson",
+
+                "Believe you can and you're halfway there. — Theodore Roosevelt",
+
+                "Great things are done by a series of small things brought together. — Vincent van Gogh",
+
+                "The future depends on what you do today. — Mahatma Gandhi"
+
+              ];
+
+              const quote =
+                quotes[
+                  Math.floor(
+                    Math.random() *
+                    quotes.length
+                  )
+                ];
+
+              try {
+
+                await awaitSafeSendMessage(
+                  remoteJid,
+                  {
+                    text:
+                      `💬 ${quote}\n\n` +
+                      "⭐ CYPHER-X PRO"
+                  }
+                );
+
+              } catch (error) {
+
+                console.error(
+                  "❌ Quote reply failed:",
+                  error.message
+                );
+
+              }
+
+              continue;
+            }
+
           }
 
         } catch (error) {
 
           console.error(
-            "❌ Message batch error:",
+            "❌ Message processing error:",
             error.message
           );
 
@@ -873,6 +1701,8 @@ async function startBot() {
   } catch (error) {
 
     starting = false;
+
+    isConnected = false;
 
     console.error("");
     console.error(
@@ -894,10 +1724,12 @@ async function startBot() {
 
     reconnectAttempts++;
 
-    const delay = Math.min(
-      5000 * reconnectAttempts,
-      60000
-    );
+    const delay =
+      Math.min(
+        5000 *
+        reconnectAttempts,
+        60000
+      );
 
     console.log(
       `⏳ Retrying in ${
@@ -905,19 +1737,32 @@ async function startBot() {
       } seconds...`
     );
 
-    setTimeout(() => {
-      startBot();
-    }, delay);
+    setTimeout(
+      () => {
+
+        startBot()
+          .catch(error => {
+
+            console.error(
+              "❌ Retry failed:",
+              error.message
+            );
+
+          });
+
+      },
+      delay
+    );
   }
 }
 
 // ======================================================
-// GLOBAL ERROR HANDLING
+// PROCESS ERROR HANDLING
 // ======================================================
 
 process.on(
   "uncaughtException",
-  (error) => {
+  error => {
 
     console.error(
       "❌ Uncaught exception:",
@@ -929,7 +1774,7 @@ process.on(
 
 process.on(
   "unhandledRejection",
-  (error) => {
+  error => {
 
     console.error(
       "❌ Unhandled rejection:",
