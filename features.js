@@ -1,38 +1,121 @@
 /**
- * Central feature-gating config.
- * Anything NOT listed here defaults to PRO — so new commands are locked
- * by default until you explicitly mark them FREE. That matches the original
- * brief: view status / react / view messages / basic replies are free,
- * everything else needs to be unlocked.
+ * ============================================================
+ * CYPHER-X FEATURE ACCESS SYSTEM
+ * ============================================================
+ *
+ * FREE:
+ * - Basic bot interaction
+ * - View incoming messages
+ * - Auto reactions
+ * - Status viewing
+ * - Ping
+ * - Menu
+ * - Upgrade
+ *
+ * PRO:
+ * - Premium commands/features
+ *
+ * IMPORTANT:
+ * Any feature not explicitly listed below is PRO by default.
+ * This prevents accidentally making a new premium feature free.
  */
 
-const TIERS = {
+const TIERS = Object.freeze({
   FREE: "free",
   PRO: "pro"
-};
+});
 
-const FEATURE_REQUIREMENTS = {
-  viewMessages: TIERS.FREE,   // logging/reading incoming messages
-  reactToMessage: TIERS.FREE, // auto-reacting to messages
-  viewStatus: TIERS.FREE,     // marking contacts' statuses as viewed
+// ============================================================
+// FEATURE REQUIREMENTS
+// ============================================================
+
+const FEATURE_REQUIREMENTS = Object.freeze({
+
+  // -------------------------
+  // FREE FEATURES
+  // -------------------------
+
+  viewMessages: TIERS.FREE,
+  reactToMessage: TIERS.FREE,
+  viewStatus: TIERS.FREE,
+
   ping: TIERS.FREE,
   menu: TIERS.FREE,
-  upgrade: TIERS.FREE,        // must stay free — it's how people pay!
+  upgrade: TIERS.FREE,
 
-  // Everything below is a paid example — add more PRO commands here.
+  // -------------------------
+  // PRO FEATURES
+  // -------------------------
+
   quote: TIERS.PRO
-};
 
-const TIER_RANK = {
+  // Add future PRO features here, for example:
+  //
+  // ai: TIERS.PRO,
+  // downloader: TIERS.PRO,
+  // sticker: TIERS.PRO,
+  // groupTools: TIERS.PRO,
+  // ownerTools: TIERS.PRO
+});
+
+// ============================================================
+// TIER RANKING
+// ============================================================
+
+const TIER_RANK = Object.freeze({
   [TIERS.FREE]: 0,
   [TIERS.PRO]: 1
-};
+});
+
+// ============================================================
+// CHECK FEATURE ACCESS
+// ============================================================
 
 function hasAccess(userTier, featureName) {
-  const required = FEATURE_REQUIREMENTS[featureName] ?? TIERS.PRO;
-  const userRank = TIER_RANK[userTier] ?? 0;
-  const requiredRank = TIER_RANK[required] ?? 1;
+
+  // Unknown features are PRO by default.
+  const requiredTier =
+    FEATURE_REQUIREMENTS[featureName] ?? TIERS.PRO;
+
+  const userRank =
+    TIER_RANK[userTier] ?? TIER_RANK[TIERS.FREE];
+
+  const requiredRank =
+    TIER_RANK[requiredTier] ?? TIER_RANK[TIERS.PRO];
+
   return userRank >= requiredRank;
 }
 
-module.exports = { TIERS, FEATURE_REQUIREMENTS, hasAccess };
+// ============================================================
+// GET REQUIRED TIER
+// ============================================================
+
+function getRequiredTier(featureName) {
+
+  return (
+    FEATURE_REQUIREMENTS[featureName] ??
+    TIERS.PRO
+  );
+}
+
+// ============================================================
+// CHECK WHETHER A TIER EXISTS
+// ============================================================
+
+function isValidTier(tier) {
+
+  return Object.values(TIERS).includes(tier);
+}
+
+// ============================================================
+// EXPORT
+// ============================================================
+
+module.exports = {
+  TIERS,
+  FEATURE_REQUIREMENTS,
+  TIER_RANK,
+  hasAccess,
+  getRequiredTier,
+  isValidTier
+};
