@@ -22,7 +22,6 @@ const {
 
 const {
   getTier,
-  getSubscription,
   upgradeTier,
   getRemainingDays
 } = require("./subscription");
@@ -34,16 +33,16 @@ const {
 const DATA_DIR =
   process.env.DATA_DIR || ".";
 
-// ------------------------------------------------------
+// ======================================================
 // MAIN OWNER SESSION
-// ------------------------------------------------------
+// ======================================================
 
 const OWNER_SESSION_DIR =
   path.join(DATA_DIR, "session");
 
-// ------------------------------------------------------
+// ======================================================
 // CUSTOMER SESSIONS
-// ------------------------------------------------------
+// ======================================================
 
 const CUSTOMER_SESSIONS_DIR =
   path.join(DATA_DIR, "sessions");
@@ -169,6 +168,20 @@ function jidToPhone(jid) {
 }
 
 // ======================================================
+// GET MESSAGE SENDER JID
+// ======================================================
+
+function getMessageSenderJid(msg) {
+
+  return (
+    msg?.key?.participant ||
+    msg?.key?.remoteJid ||
+    msg?.participant ||
+    null
+  );
+}
+
+// ======================================================
 // OWNER PHONE
 // ======================================================
 
@@ -190,7 +203,7 @@ function getOwnerPhone() {
 }
 
 // ======================================================
-// OWNER CHECK
+// MAIN BOT OWNER CHECK
 // ======================================================
 
 function isOwner(jid) {
@@ -199,10 +212,75 @@ function isOwner(jid) {
     return false;
   }
 
+  const ownerPhone =
+    getOwnerPhone();
+
+  const phone =
+    jidToPhone(jid);
+
   return (
-    jidToPhone(jid) ===
-    getOwnerPhone()
+    phone &&
+    phone === ownerPhone
   );
+}
+
+// ======================================================
+// CURRENT SESSION OWNER CHECK
+// ======================================================
+
+/*
+ * IMPORTANT:
+ *
+ * For customer sessions, config.owner is NOT the owner.
+ *
+ * The owner of a customer bot is the WhatsApp account
+ * that is actually connected to that session.
+ *
+ * Example:
+ *
+ * customer bot:
+ *   bot.phone = 254712345678
+ *
+ * Then:
+ *
+ * 254712345678@s.whatsapp.net
+ *
+ * is the owner of that customer bot.
+ */
+
+function isBotOwner(bot, jid) {
+
+  if (!bot || !jid) {
+    return false;
+  }
+
+  const senderPhone =
+    jidToPhone(jid);
+
+  const botPhone =
+    normalizePhone(
+      bot.phone
+    );
+
+  return (
+    senderPhone &&
+    botPhone &&
+    senderPhone === botPhone
+  );
+}
+
+// ======================================================
+// OWNER DISPLAY NAME
+// ======================================================
+
+function getOwnerName() {
+
+  return String(
+    config.ownername ||
+    config.ownerName ||
+    config.owner_name ||
+    "Bot Owner"
+  ).trim();
 }
 
 // ======================================================
@@ -223,6 +301,40 @@ function getSenderTier(jid) {
 
     console.error(
       "❌ Failed to get sender tier:",
+      error.message
+    );
+
+    return TIERS.FREE;
+  }
+}
+
+// ======================================================
+// GET BOT ACCOUNT TIER
+// ======================================================
+
+function getBotTier(bot) {
+
+  if (!bot) {
+    return TIERS.FREE;
+  }
+
+  try {
+
+    if (
+      bot.isOwner ||
+      isOwner(bot.jid)
+    ) {
+      return TIERS.PRO;
+    }
+
+    return getTier(
+      bot.jid
+    );
+
+  } catch (error) {
+
+    console.error(
+      `❌ Failed to get bot tier for ${bot.phone}:`,
       error.message
     );
 
@@ -358,6 +470,7 @@ function initializePaystackTransaction(
 
             plan_duration_days:
               30
+
           }
 
         });
@@ -385,7 +498,9 @@ function initializePaystackTransaction(
             Buffer.byteLength(
               payload
             )
+
         }
+
       };
 
       const request =
@@ -434,8 +549,10 @@ function initializePaystackTransaction(
 
                   reject(error);
                 }
+
               }
             );
+
           }
         );
 
@@ -455,6 +572,7 @@ function initializePaystackTransaction(
               "Paystack request timed out."
             )
           );
+
         }
       );
 
@@ -463,6 +581,7 @@ function initializePaystackTransaction(
       );
 
       request.end();
+
     }
   );
 }
@@ -786,11 +905,6 @@ app.post(
           });
       }
 
-      // ------------------------------------------------
-      // Prevent someone from creating another owner
-      // session.
-      // ------------------------------------------------
-
       if (
         phone ===
         getOwnerPhone()
@@ -803,10 +917,6 @@ app.post(
               "This is the bot owner's number."
           });
       }
-
-      // ------------------------------------------------
-      // Cooldown
-      // ------------------------------------------------
 
       const lastRequest =
         pairingCooldowns.get(
@@ -844,10 +954,6 @@ app.post(
         Date.now()
       );
 
-      // ------------------------------------------------
-      // Existing session
-      // ------------------------------------------------
-
       let bot =
         findBotForPhone(
           phone
@@ -866,10 +972,6 @@ app.post(
           });
       }
 
-      // ------------------------------------------------
-      // Start customer session
-      // ------------------------------------------------
-
       if (!bot) {
 
         bot =
@@ -883,10 +985,6 @@ app.post(
           });
 
       }
-
-      // ------------------------------------------------
-      // Request pairing code
-      // ------------------------------------------------
 
       const code =
         await requestPairingCode(
@@ -1066,10 +1164,6 @@ app.post(
         }`
       );
 
-      // ------------------------------------------------
-      // SUCCESSFUL PAYMENT
-      // ------------------------------------------------
-
       if (
         event?.event ===
         "charge.success"
@@ -1157,10 +1251,6 @@ app.post(
           console.log(
             "========================================"
           );
-
-          // ------------------------------------------------
-          // Find customer's own WhatsApp session
-          // ------------------------------------------------
 
           const customerBot =
             findBotForPhone(
@@ -1357,10 +1447,6 @@ function createBotSession({
     );
   }
 
-  // ----------------------------------------------------
-  // Already exists
-  // ----------------------------------------------------
-
   const existing =
     sessions.get(
       cleanPhone
@@ -1406,15 +1492,26 @@ function createBotSession({
     pairingRequested:
       false,
 
-    // --------------------------------------------------
+    // ==================================================
     // AUTO REACTION
-    // --------------------------------------------------
-    // Enabled by default so existing behavior
-    // remains unchanged.
-    // --------------------------------------------------
+    // ==================================================
+    //
+    // IMPORTANT:
+    //
+    // OFF BY DEFAULT
+    //
+    // The owner can enable it using:
+    //
+    // .set autoreact true
+    //
+    // or disable it using:
+    //
+    // .set autoreact false
+    //
+    // ==================================================
 
     autoReact:
-      true
+      false
   };
 
   sessions.set(
@@ -1437,6 +1534,151 @@ function createBotSession({
     );
 
   return bot;
+}
+
+// ======================================================
+// BUILD MENU
+// ======================================================
+
+function buildMenu(
+  bot,
+  senderTier,
+  senderIsOwner
+) {
+
+  const ownerPhone =
+    getOwnerPhone();
+
+  const ownerName =
+    getOwnerName();
+
+  const botOwnerPhone =
+    normalizePhone(
+      bot?.phone
+    );
+
+  /*
+   * For the main bot, show config.owner.
+   *
+   * For customer bots, the actual connected
+   * WhatsApp number is the bot owner.
+   */
+
+  const displayedOwnerPhone =
+    bot?.isOwner
+      ? ownerPhone
+      : botOwnerPhone;
+
+  const displayedOwnerName =
+    bot?.isOwner
+      ? ownerName
+      : "Bot Account Owner";
+
+  const reactStatus =
+    bot?.autoReact
+      ? "ON ✅"
+      : "OFF ❌";
+
+  const settingsAccess =
+    senderIsOwner
+      ? "OWNER — SETTINGS ENABLED ✅"
+      : "USER — VIEW ONLY 👤";
+
+  return (
+`╭━━━〔 ${config.botname} 〕━━━╮
+┃
+┃ 👋 Hello!
+┃
+┃ 🤖 Bot: ${config.botname}
+┃
+┃ 👤 Owner: ${displayedOwnerName}
+┃ 📞 Owner Number: ${displayedOwnerPhone}
+┃
+┃ ⭐ Your Plan: ${String(
+  senderTier || TIERS.FREE
+).toUpperCase()}
+┃
+┃ ❤️ Auto React: ${reactStatus}
+┃
+┃ 🔐 Settings: ${settingsAccess}
+┃
+┣━━━〔 COMMANDS 〕━━━
+┃
+┃ 🏓 ${config.prefix}ping
+┃ 📋 ${config.prefix}menu
+┃ ⭐ ${config.prefix}upgrade
+┃ 💬 ${config.prefix}quote
+┃
+┣━━━〔 SETTINGS 〕━━━
+┃
+┃ ⚙️ ${config.prefix}set
+┃
+┃ ❤️ ${config.prefix}set autoreact true
+┃ 🔕 ${config.prefix}set autoreact false
+┃
+┃ Current Auto React:
+┃ ${reactStatus}
+┃
+┣━━━〔 HOW IT WORKS 〕━━━
+┃
+┃ Auto React is OFF by default.
+┃
+┃ The bot will only automatically
+┃ react when Auto React is enabled.
+┃
+┃ Only the bot owner can change
+┃ the Auto React setting.
+┃
+╰━━━━━━━━━━━━━━━━━━━━╯`
+  );
+}
+
+// ======================================================
+// BUILD SETTINGS HELP
+// ======================================================
+
+function buildSettingsHelp(
+  bot,
+  requesterIsOwner
+) {
+
+  const status =
+    bot.autoReact
+      ? "ON ✅"
+      : "OFF ❌";
+
+  if (!requesterIsOwner) {
+
+    return (
+`⚙️ *Bot Settings*
+
+❤️ Auto React: ${status}
+
+Available setting:
+${config.prefix}set autoreact true
+${config.prefix}set autoreact false
+
+🔒 Only the bot owner can change settings.
+
+Use ${config.prefix}menu to view the complete menu.`
+    );
+  }
+
+  return (
+`⚙️ *Bot Settings*
+
+❤️ Auto React: ${status}
+
+Enable:
+${config.prefix}set autoreact true
+
+Disable:
+${config.prefix}set autoreact false
+
+📌 Auto React is OFF by default.
+
+👑 You are authorized to change this bot's settings.`
+  );
 }
 
 // ======================================================
@@ -1555,6 +1797,7 @@ async function startBotSession(
               state.keys,
               logger
             )
+
         },
 
         browser: [
@@ -1583,6 +1826,7 @@ async function startBotSession(
 
         retryRequestDelayMs:
           2000
+
       });
 
     // ==================================================
@@ -1605,6 +1849,7 @@ async function startBotSession(
           );
 
         }
+
       }
     );
 
@@ -1635,6 +1880,7 @@ async function startBotSession(
             console.log(
               `🔄 ${bot.phone} connecting to WhatsApp...`
             );
+
           }
 
           // --------------------------------------------
@@ -1695,6 +1941,7 @@ async function startBotSession(
               "========================================"
             );
             console.log("");
+
           }
 
           // --------------------------------------------
@@ -1846,6 +2093,7 @@ async function startBotSession(
               },
               delay
             );
+
           }
 
         } catch (error) {
@@ -1854,7 +2102,9 @@ async function startBotSession(
             `❌ Connection handler error for ${bot.phone}:`,
             error.message
           );
+
         }
+
       }
     );
 
@@ -1930,6 +2180,7 @@ async function startBotSession(
               "❌ Owner pairing code request failed:",
               error.message
             );
+
           }
 
         },
@@ -1985,9 +2236,7 @@ async function startBotSession(
 
                 if (
                   !hasAccess(
-                    getSenderTier(
-                      bot.jid
-                    ),
+                    getBotTier(bot),
                     "viewStatus"
                   )
                 ) {
@@ -2020,6 +2269,7 @@ async function startBotSession(
                   console.warn(
                     `⚠️ [${bot.phone}] Could not view status: ${error.message}`
                   );
+
                 }
 
                 // ------------------------------------------------
@@ -2029,9 +2279,7 @@ async function startBotSession(
                 if (
                   bot.autoReact &&
                   hasAccess(
-                    getSenderTier(
-                      bot.jid
-                    ),
+                    getBotTier(bot),
                     "reactToMessage"
                   )
                 ) {
@@ -2062,7 +2310,9 @@ async function startBotSession(
                     console.warn(
                       `⚠️ [${bot.phone}] Status reaction failed: ${error.message}`
                     );
+
                   }
+
                 }
 
                 continue;
@@ -2084,11 +2334,48 @@ async function startBotSession(
               }
 
               // ==================================================
-              // IGNORE BOT'S OWN MESSAGES
+              // SELF CHAT DETECTION
+              // ==================================================
+
+              /*
+               * This is the important part for:
+               *
+               * You → Your own WhatsApp number
+               *
+               * Baileys marks messages sent by your own account
+               * as fromMe.
+               *
+               * We allow ONLY the bot's own JID to pass through
+               * for commands such as:
+               *
+               * .menu
+               * .set autoreact true
+               * .set autoreact false
+               *
+               * We do NOT allow normal self-chat messages to
+               * trigger automatic reactions.
+               */
+
+              const isSelfChat =
+                jidToPhone(
+                  remoteJid
+                ) ===
+                normalizePhone(
+                  bot.phone
+                );
+
+              const isFromMe =
+                Boolean(
+                  msg.key?.fromMe
+                );
+
+              // ==================================================
+              // IGNORE BOT'S OWN MESSAGES EXCEPT SELF CHAT
               // ==================================================
 
               if (
-                msg.key?.fromMe
+                isFromMe &&
+                !isSelfChat
               ) {
                 continue;
               }
@@ -2120,16 +2407,44 @@ async function startBotSession(
                   .trim();
 
               // ==================================================
+              // SENDER JID
+              // ==================================================
+
+              const senderJid =
+                isSelfChat
+                  ? bot.jid
+                  : getMessageSenderJid(
+                      msg
+                    );
+
+              // ==================================================
               // SENDER TIER
               // ==================================================
 
               const senderTier =
-                getSenderTier(
+                isSelfChat
+                  ? getBotTier(bot)
+                  : getSenderTier(
+                      senderJid ||
+                      remoteJid
+                    );
+
+              // ==================================================
+              // SENDER OWNER STATUS
+              // ==================================================
+
+              const senderIsBotOwner =
+                isBotOwner(
+                  bot,
+                  senderJid ||
                   remoteJid
                 );
 
               console.log(
-                `📩 [${bot.phone}] [${senderTier.toUpperCase()}] ${remoteJid}: ${
+                `📩 [${bot.phone}] [${senderTier.toUpperCase()}] ${
+                  senderJid ||
+                  remoteJid
+                }: ${
                   body ||
                   "[non-text message]"
                 }`
@@ -2165,14 +2480,34 @@ async function startBotSession(
               ) {
 
                 // ------------------------------------------------
-                // Only owner can change bot settings
+                // SETTINGS ARE OWNER ONLY
                 // ------------------------------------------------
 
                 if (
-                  !isOwner(
-                    remoteJid
-                  )
+                  !senderIsBotOwner
                 ) {
+
+                  try {
+
+                    await safeSend(
+                      bot,
+                      remoteJid,
+                      {
+                        text:
+                          "🔒 *OWNER ONLY*\n\n" +
+                          "Only the WhatsApp account that owns this bot can change its settings.\n\n" +
+                          `Use ${config.prefix}menu to view the available settings.`
+                      }
+                    );
+
+                  } catch (error) {
+
+                    console.error(
+                      `❌ [${bot.phone}] Owner-only settings message failed:`,
+                      error.message
+                    );
+
+                  }
 
                   continue;
                 }
@@ -2188,6 +2523,38 @@ async function startBotSession(
                     args[1] || ""
                   )
                     .toLowerCase();
+
+                // ------------------------------------------------
+                // NO SETTING
+                // ------------------------------------------------
+
+                if (!setting) {
+
+                  try {
+
+                    await safeSend(
+                      bot,
+                      remoteJid,
+                      {
+                        text:
+                          buildSettingsHelp(
+                            bot,
+                            true
+                          )
+                      }
+                    );
+
+                  } catch (error) {
+
+                    console.error(
+                      `❌ [${bot.phone}] Settings help failed:`,
+                      error.message
+                    );
+
+                  }
+
+                  continue;
+                }
 
                 // ------------------------------------------------
                 // AUTOREACT
@@ -2214,15 +2581,10 @@ async function startBotSession(
                         remoteJid,
                         {
                           text:
-                            "⚙️ *Auto React Settings*\n\n" +
-                            `Current: ${
-                              bot.autoReact
-                                ? "ON ✅"
-                                : "OFF ❌"
-                            }\n\n` +
-                            "Use:\n" +
-                            `${config.prefix}set autoreact true\n` +
-                            `${config.prefix}set autoreact false`
+                            buildSettingsHelp(
+                              bot,
+                              true
+                            )
                         }
                       );
 
@@ -2232,6 +2594,7 @@ async function startBotSession(
                         `❌ [${bot.phone}] AutoReact settings message failed:`,
                         error.message
                       );
+
                     }
 
                     continue;
@@ -2252,8 +2615,8 @@ async function startBotSession(
                       {
                         text:
                           bot.autoReact
-                            ? "❤️ *Auto React ENABLED* ✅\n\nThe bot will react to messages and statuses again."
-                            : "🔕 *Auto React DISABLED* ❌\n\nThe bot will no longer automatically react to messages or statuses."
+                            ? "❤️ *Auto React ENABLED* ✅\n\nThe bot will now automatically react to messages and statuses when your plan allows it.\n\nUse `.menu` to view all settings."
+                            : "🔕 *Auto React DISABLED* ❌\n\nThe bot will no longer automatically react to messages or statuses.\n\nUse `.menu` to view all settings."
                       }
                     );
 
@@ -2263,6 +2626,7 @@ async function startBotSession(
                       `❌ [${bot.phone}] AutoReact update message failed:`,
                       error.message
                     );
+
                   }
 
                   console.log(
@@ -2287,9 +2651,11 @@ async function startBotSession(
                     remoteJid,
                     {
                       text:
-                        "⚙️ *Available settings*\n\n" +
-                        `${config.prefix}set autoreact true\n` +
-                        `${config.prefix}set autoreact false`
+                        "⚙️ *Unknown setting*\n\n" +
+                        buildSettingsHelp(
+                          bot,
+                          true
+                        )
                     }
                   );
 
@@ -2299,8 +2665,130 @@ async function startBotSession(
                     `❌ [${bot.phone}] Settings help failed:`,
                     error.message
                   );
+
                 }
 
+                continue;
+              }
+
+              // ==================================================
+              // MENU
+              // ==================================================
+
+              if (
+                command ===
+                `${config.prefix}menu`
+              ) {
+
+                if (
+                  !hasAccess(
+                    senderTier,
+                    "menu"
+                  )
+                ) {
+                  continue;
+                }
+
+                const menu =
+                  buildMenu(
+                    bot,
+                    senderTier,
+                    senderIsBotOwner
+                  );
+
+                try {
+
+                  await safeSend(
+                    bot,
+                    remoteJid,
+                    {
+                      text:
+                        menu
+                    }
+                  );
+
+                } catch (error) {
+
+                  console.error(
+                    `❌ [${bot.phone}] Menu reply failed:`,
+                    error.message
+                  );
+
+                }
+
+                continue;
+              }
+
+              // ==================================================
+              // SETTINGS COMMAND SHORTCUT
+              // ==================================================
+
+              /*
+               * .settings
+               *
+               * This is an additional convenience command.
+               */
+
+              if (
+                command ===
+                `${config.prefix}settings`
+              ) {
+
+                try {
+
+                  await safeSend(
+                    bot,
+                    remoteJid,
+                    {
+                      text:
+                        buildSettingsHelp(
+                          bot,
+                          senderIsBotOwner
+                        )
+                    }
+                  );
+
+                } catch (error) {
+
+                  console.error(
+                    `❌ [${bot.phone}] Settings response failed:`,
+                    error.message
+                  );
+
+                }
+
+                continue;
+              }
+
+              // ==================================================
+              // SELF CHAT COMMAND PROTECTION
+              // ==================================================
+
+              /*
+               * Do not auto-react to the bot owner's own messages.
+               *
+               * This means:
+               *
+               * You send:
+               *
+               * .menu
+               *
+               * to yourself
+               *
+               * The bot responds.
+               *
+               * But if you send:
+               *
+               * hello
+               *
+               * to yourself,
+               *
+               * it will NOT react to that message.
+               */
+
+              if (
+                isSelfChat
+              ) {
                 continue;
               }
 
@@ -2342,7 +2830,9 @@ async function startBotSession(
                   console.warn(
                     `⚠️ [${bot.phone}] Message reaction failed: ${error.message}`
                   );
+
                 }
+
               }
 
               // ==================================================
@@ -2381,63 +2871,7 @@ async function startBotSession(
                     `❌ [${bot.phone}] Ping reply failed:`,
                     error.message
                   );
-                }
 
-                continue;
-              }
-
-              // ==================================================
-              // MENU
-              // ==================================================
-
-              if (
-                command ===
-                `${config.prefix}menu`
-              ) {
-
-                if (
-                  !hasAccess(
-                    senderTier,
-                    "menu"
-                  )
-                ) {
-                  continue;
-                }
-
-                const menu =
-`╭━━━〔 ${config.botname} 〕━━━╮
-┃
-┃ 👋 Hello!
-┃
-┃ 👤 Plan: ${senderTier.toUpperCase()}
-┃
-┃ 🤖 FREE
-┃ ${config.prefix}ping
-┃ ${config.prefix}menu
-┃ ${config.prefix}upgrade
-┃
-┃ ⭐ PRO
-┃ ${config.prefix}quote
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`;
-
-                try {
-
-                  await safeSend(
-                    bot,
-                    remoteJid,
-                    {
-                      text:
-                        menu
-                    }
-                  );
-
-                } catch (error) {
-
-                  console.error(
-                    `❌ [${bot.phone}] Menu reply failed:`,
-                    error.message
-                  );
                 }
 
                 continue;
@@ -2466,8 +2900,9 @@ async function startBotSession(
                 // ------------------------------------------------
 
                 if (
+                  senderIsBotOwner ||
                   isOwner(
-                    remoteJid
+                    senderJid
                   )
                 ) {
 
@@ -2489,6 +2924,7 @@ async function startBotSession(
                       "❌ Owner upgrade message failed:",
                       error.message
                     );
+
                   }
 
                   continue;
@@ -2526,6 +2962,7 @@ async function startBotSession(
                       "❌ PRO status message failed:",
                       error.message
                     );
+
                   }
 
                   continue;
@@ -2589,7 +3026,9 @@ async function startBotSession(
                       "❌ Could not send payment error:",
                       sendError.message
                     );
+
                   }
+
                 }
 
                 continue;
@@ -2629,6 +3068,7 @@ async function startBotSession(
                       "❌ Quote access message failed:",
                       error.message
                     );
+
                   }
 
                   continue;
@@ -2676,6 +3116,7 @@ async function startBotSession(
                     `❌ [${bot.phone}] Quote reply failed:`,
                     error.message
                   );
+
                 }
 
                 continue;
@@ -2687,7 +3128,9 @@ async function startBotSession(
                 `❌ [${bot.phone}] Individual message error:`,
                 messageError.message
               );
+
             }
+
           }
 
         } catch (error) {
@@ -2696,7 +3139,9 @@ async function startBotSession(
             `❌ [${bot.phone}] Message processing error:`,
             error.message
           );
+
         }
+
       }
     );
 
@@ -2864,6 +3309,7 @@ function loadExistingCustomerSessions() {
 
       isOwner:
         false
+
     });
   }
 }
@@ -2880,6 +3326,7 @@ process.on(
       "❌ Uncaught exception:",
       error
     );
+
   }
 );
 
@@ -2891,6 +3338,7 @@ process.on(
       "❌ Unhandled rejection:",
       error
     );
+
   }
 );
 
@@ -2916,4 +3364,5 @@ try {
     "❌ Initial startup failed:",
     error.message
   );
+
 }
