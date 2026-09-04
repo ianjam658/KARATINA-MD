@@ -1,6 +1,6 @@
 module.exports = {
-  owner: "0797631263",
+  owner: "254715068518",
   botname: "CYPHER-X",
   ownername: "Wafula",
   prefix: "."
-}
+};
