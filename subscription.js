@@ -5,18 +5,22 @@
  *
  * Stores PRO subscriptions in subscriptions.json.
  *
- * IMPORTANT:
- * Set DATA_DIR to a persistent Render Disk path in production,
- * otherwise subscriptions can disappear when the service is
- * restarted/redeployed.
+ * For Render production, set:
+ *
+ * DATA_DIR=/var/data
+ *
+ * on a persistent disk.
  */
 
 const fs = require("fs");
 const path = require("path");
-const { TIERS, isValidTier } = require("./features");
+const {
+  TIERS,
+  isValidTier
+} = require("./features");
 
 // ============================================================
-// STORAGE LOCATION
+// STORAGE
 // ============================================================
 
 const DATA_DIR =
@@ -27,20 +31,13 @@ const DB_PATH =
   path.join(DATA_DIR, "subscriptions.json");
 
 // ============================================================
-// ENSURE STORAGE EXISTS
+// STORAGE SETUP
 // ============================================================
 
 function ensureStorage() {
-  try {
-    fs.mkdirSync(DATA_DIR, {
-      recursive: true
-    });
-  } catch (error) {
-    console.error(
-      "❌ Could not create subscription storage:",
-      error.message
-    );
-  }
+  fs.mkdirSync(DATA_DIR, {
+    recursive: true
+  });
 }
 
 // ============================================================
@@ -48,7 +45,6 @@ function ensureStorage() {
 // ============================================================
 
 function normalize(jid) {
-
   if (!jid) return "";
 
   return String(jid)
@@ -61,11 +57,9 @@ function normalize(jid) {
 // ============================================================
 
 function loadDb() {
-
   ensureStorage();
 
   try {
-
     if (!fs.existsSync(DB_PATH)) {
       return {};
     }
@@ -85,7 +79,7 @@ function loadDb() {
       Array.isArray(db)
     ) {
       console.warn(
-        "⚠️ subscriptions.json contains invalid data. Starting empty database."
+        "⚠️ Invalid subscriptions database. Starting empty."
       );
 
       return {};
@@ -94,9 +88,8 @@ function loadDb() {
     return db;
 
   } catch (error) {
-
     console.error(
-      "❌ Failed to load subscription database:",
+      "❌ Failed to load subscriptions:",
       error.message
     );
 
@@ -105,34 +98,30 @@ function loadDb() {
 }
 
 // ============================================================
-// SAVE DATABASE
+// SAVE DATABASE ATOMICALLY
 // ============================================================
 
 function saveDb(db) {
-
   ensureStorage();
 
   const tempPath =
     `${DB_PATH}.tmp`;
 
   try {
-
     fs.writeFileSync(
       tempPath,
       JSON.stringify(db, null, 2),
       "utf8"
     );
 
-    // Replace the old file after the new one is written.
     fs.renameSync(
       tempPath,
       DB_PATH
     );
 
   } catch (error) {
-
     console.error(
-      "❌ Failed to save subscription database:",
+      "❌ Failed to save subscriptions:",
       error.message
     );
 
@@ -147,11 +136,10 @@ function saveDb(db) {
 }
 
 // ============================================================
-// GET USER SUBSCRIPTION
+// GET SUBSCRIPTION
 // ============================================================
 
 function getSubscription(jid) {
-
   const key = normalize(jid);
 
   if (!key) {
@@ -165,51 +153,43 @@ function getSubscription(jid) {
   const record = db[key];
 
   if (!record) {
-
     return {
       tier: TIERS.FREE,
       expiresAt: null
     };
   }
 
-  // ----------------------------------------------------------
-  // Validate stored tier
-  // ----------------------------------------------------------
-
+  // Invalid tier
   if (!isValidTier(record.tier)) {
-
     console.warn(
-      `⚠️ Invalid subscription tier for ${key}. Resetting to FREE.`
+      `⚠️ Invalid tier for ${key}.`
     );
 
+    delete db[key];
+
+    try {
+      saveDb(db);
+    } catch {}
+
     return {
       tier: TIERS.FREE,
       expiresAt: null
     };
   }
 
-  // ----------------------------------------------------------
-  // FREE subscription
-  // ----------------------------------------------------------
-
+  // FREE
   if (record.tier === TIERS.FREE) {
-
     return {
       tier: TIERS.FREE,
       expiresAt: null
     };
   }
 
-  // ----------------------------------------------------------
-  // Check expiration
-  // ----------------------------------------------------------
-
+  // Expired
   if (
     record.expiresAt &&
     Date.now() >= Number(record.expiresAt)
   ) {
-
-    // Remove expired subscription from storage.
     delete db[key];
 
     try {
@@ -236,16 +216,15 @@ function getSubscription(jid) {
 }
 
 // ============================================================
-// GET CURRENT TIER
+// GET TIER
 // ============================================================
 
 function getTier(jid) {
-
   return getSubscription(jid).tier;
 }
 
 // ============================================================
-// UPGRADE USER
+// UPGRADE
 // ============================================================
 
 function upgradeTier(
@@ -253,12 +232,11 @@ function upgradeTier(
   tier = TIERS.PRO,
   durationDays = 30
 ) {
-
   const key = normalize(jid);
 
   if (!key) {
     throw new Error(
-      "Cannot upgrade subscription: invalid WhatsApp JID."
+      "Invalid WhatsApp JID."
     );
   }
 
@@ -276,25 +254,16 @@ function upgradeTier(
     days <= 0
   ) {
     throw new Error(
-      "Subscription duration must be greater than 0 days."
+      "Duration must be greater than zero."
     );
   }
 
   const db = loadDb();
+  const now = Date.now();
 
-  const now =
-    Date.now();
+  const existing = db[key];
 
-  const existing =
-    db[key];
-
-  // ----------------------------------------------------------
-  // If an existing PRO subscription is still active,
-  // extend it instead of resetting it from today.
-  // ----------------------------------------------------------
-
-  let startFrom =
-    now;
+  let startFrom = now;
 
   if (
     existing &&
@@ -318,7 +287,7 @@ function upgradeTier(
   saveDb(db);
 
   console.log(
-    `✅ Subscription updated: ${key} → ${tier} until ${new Date(expiresAt).toISOString()}`
+    `✅ ${key} upgraded to ${tier}`
   );
 
   return {
@@ -329,18 +298,15 @@ function upgradeTier(
 }
 
 // ============================================================
-// DOWNGRADE USER
+// DOWNGRADE
 // ============================================================
 
 function downgradeTier(jid) {
-
-  const key =
-    normalize(jid);
+  const key = normalize(jid);
 
   if (!key) return false;
 
-  const db =
-    loadDb();
+  const db = loadDb();
 
   if (!db[key]) {
     return false;
@@ -358,20 +324,18 @@ function downgradeTier(jid) {
 }
 
 // ============================================================
-// CHECK PRO STATUS
+// PRO CHECK
 // ============================================================
 
 function isPro(jid) {
-
   return getTier(jid) === TIERS.PRO;
 }
 
 // ============================================================
-// GET REMAINING DAYS
+// REMAINING DAYS
 // ============================================================
 
 function getRemainingDays(jid) {
-
   const subscription =
     getSubscription(jid);
 
