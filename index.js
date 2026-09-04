@@ -78,24 +78,52 @@ app.use(
 // BOT STATE
 // ======================================================
 
-/*
- * Every connected WhatsApp account gets its own object.
- *
- * Example:
- *
- * sessions:
- *   owner
- *   254715068518
- *   254712345678
- *   254799999999
- */
-
 const sessions = new Map();
 
 const pairingCooldowns = new Map();
 
 const PAIRING_COOLDOWN_MS =
   60 * 1000;
+
+// ======================================================
+// WATCHDOG SETTINGS
+// ======================================================
+//
+// The watchdog is deliberately independent of Render.
+//
+// Render can be alive while the WhatsApp socket has
+// silently become stale.
+//
+// We therefore monitor each individual WhatsApp session.
+//
+// WATCHDOG_INTERVAL_MS:
+//   How often we check the session.
+//
+// WATCHDOG_STALE_MS:
+//   How long a connected session can remain completely
+//   inactive before we consider it potentially stale.
+//
+// WATCHDOG_RESTART_COOLDOWN_MS:
+//   Prevents repeated restart loops.
+//
+// IMPORTANT:
+// We do NOT restart a healthy connection simply because
+// no one has sent a message. Baileys connection activity,
+// connection updates and socket state are also tracked.
+//
+// ======================================================
+
+const WATCHDOG_INTERVAL_MS =
+  30 * 1000;
+
+const WATCHDOG_STALE_MS =
+  5 * 60 * 1000;
+
+const WATCHDOG_RESTART_COOLDOWN_MS =
+  2 * 60 * 1000;
+
+const WATCHDOG_STARTUP_GRACE_MS =
+  90 * 1000;
 
 // ======================================================
 // REACTION LIST
@@ -227,26 +255,6 @@ function isOwner(jid) {
 // ======================================================
 // CURRENT SESSION OWNER CHECK
 // ======================================================
-
-/*
- * IMPORTANT:
- *
- * For customer sessions, config.owner is NOT the owner.
- *
- * The owner of a customer bot is the WhatsApp account
- * that is actually connected to that session.
- *
- * Example:
- *
- * customer bot:
- *   bot.phone = 254712345678
- *
- * Then:
- *
- * 254712345678@s.whatsapp.net
- *
- * is the owner of that customer bot.
- */
 
 function isBotOwner(bot, jid) {
 
@@ -1052,6 +1060,70 @@ app.get(
         )
         .length;
 
+    const now =
+      Date.now();
+
+    const sessionHealth =
+      Array.from(
+        sessions.values()
+      )
+        .map(
+          bot => {
+
+            const lastActivity =
+              bot.lastActivity || 0;
+
+            const inactiveSeconds =
+              lastActivity
+                ? Math.floor(
+                    (
+                      now -
+                      lastActivity
+                    ) / 1000
+                  )
+                : null;
+
+            return {
+
+              phone:
+                bot.phone,
+
+              type:
+                bot.isOwner
+                  ? "owner"
+                  : "customer",
+
+              connected:
+                bot.isConnected,
+
+              lastActivity:
+                bot.lastActivity
+                  ? new Date(
+                      bot.lastActivity
+                    ).toISOString()
+                  : null,
+
+              lastConnected:
+                bot.lastConnected
+                  ? new Date(
+                      bot.lastConnected
+                    ).toISOString()
+                  : null,
+
+              inactiveSeconds,
+
+              watchdog:
+                bot.watchdogStatus ||
+                "starting",
+
+              reconnectAttempts:
+                bot.reconnectAttempts
+
+            };
+
+          }
+        );
+
     res
       .status(200)
       .json({
@@ -1076,7 +1148,13 @@ app.get(
           sessions.size,
 
         connectedSessions:
-          connected
+          connected,
+
+        watchdog:
+          "active",
+
+        sessionHealth
+
       });
   }
 );
@@ -1332,6 +1410,10 @@ app.listen(
       `🔗 Customer pairing: /pair`
     );
 
+    console.log(
+      `🐕 WhatsApp watchdog: ACTIVE`
+    );
+
   }
 );
 
@@ -1343,6 +1425,39 @@ const logger =
   P({
     level: "silent"
   });
+
+// ======================================================
+// TOUCH BOT ACTIVITY
+// ======================================================
+//
+// This is used by the watchdog.
+//
+// IMPORTANT:
+// Activity does not mean "someone sent a message".
+//
+// Connection events, incoming messages and successful
+// outgoing operations all update the activity timestamp.
+//
+// ======================================================
+
+function touchBotActivity(
+  bot,
+  reason = "activity"
+) {
+
+  if (!bot) {
+    return;
+  }
+
+  bot.lastActivity =
+    Date.now();
+
+  bot.lastActivityReason =
+    reason;
+
+  bot.watchdogStatus =
+    "healthy";
+}
 
 // ======================================================
 // REQUEST PAIRING CODE
@@ -1393,6 +1508,11 @@ async function requestPairingCode(
       await bot.socket.requestPairingCode(
         bot.phone
       );
+
+    touchBotActivity(
+      bot,
+      "pairing-code-requested"
+    );
 
     console.log("");
     console.log(
@@ -1460,6 +1580,9 @@ function createBotSession({
     sessionDir
   );
 
+  const now =
+    Date.now();
+
   const bot = {
 
     phone:
@@ -1493,25 +1616,44 @@ function createBotSession({
       false,
 
     // ==================================================
-    // AUTO REACTION
+    // WATCHDOG STATE
     // ==================================================
-    //
-    // IMPORTANT:
-    //
-    // OFF BY DEFAULT
-    //
-    // The owner can enable it using:
-    //
-    // .set autoreact true
-    //
-    // or disable it using:
-    //
-    // .set autoreact false
-    //
+
+    watchdogStatus:
+      "starting",
+
+    lastActivity:
+      now,
+
+    lastActivityReason:
+      "session-created",
+
+    lastConnected:
+      0,
+
+    lastDisconnected:
+      0,
+
+    lastWatchdogCheck:
+      0,
+
+    lastWatchdogRestart:
+      0,
+
+    watchdogRestarting:
+      false,
+
+    // Used to identify a socket generation.
+    socketGeneration:
+      0,
+
+    // ==================================================
+    // AUTO REACTION
     // ==================================================
 
     autoReact:
       false
+
   };
 
   sessions.set(
@@ -1557,13 +1699,6 @@ function buildMenu(
       bot?.phone
     );
 
-  /*
-   * For the main bot, show config.owner.
-   *
-   * For customer bots, the actual connected
-   * WhatsApp number is the bot owner.
-   */
-
   const displayedOwnerPhone =
     bot?.isOwner
       ? ownerPhone
@@ -1591,8 +1726,8 @@ function buildMenu(
 ┃
 ┃ 🤖 Bot: ${config.botname}
 ┃
-┃ 👤 Owner: ${displayedOwnerName}
-┃ 📞 Owner Number: ${displayedOwnerPhone}
+┃ 👤 Creator: ${displayedOwnerName}
+┃ 📞 Creator Number: ${displayedOwnerPhone}
 ┃
 ┃ ⭐ Your Plan: ${String(
   senderTier || TIERS.FREE
@@ -1619,15 +1754,14 @@ function buildMenu(
 ┃ Current Auto React:
 ┃ ${reactStatus}
 ┃
-┣━━━〔 HOW IT WORKS 〕━━━
+┣━━━〔 WATCHDOG 〕━━━
 ┃
-┃ Auto React is OFF by default.
+┃ 🐕 Connection Watchdog: ACTIVE
 ┃
-┃ The bot will only automatically
-┃ react when Auto React is enabled.
-┃
-┃ Only the bot owner can change
-┃ the Auto React setting.
+┃ The bot automatically monitors
+┃ the WhatsApp connection and attempts
+┃ recovery if the connection becomes
+┃ stale or stops responding.
 ┃
 ╰━━━━━━━━━━━━━━━━━━━━╯`
   );
@@ -1682,6 +1816,493 @@ ${config.prefix}set autoreact false
 }
 
 // ======================================================
+// CLOSE OLD SOCKET
+// ======================================================
+//
+// Used by the watchdog.
+//
+// We intentionally do not delete the authentication
+// directory. The existing WhatsApp login is retained.
+//
+// ======================================================
+
+async function closeBotSocket(
+  bot,
+  reason = "watchdog"
+) {
+
+  if (!bot) {
+    return;
+  }
+
+  const socket =
+    bot.socket;
+
+  if (!socket) {
+    return;
+  }
+
+  console.log(
+    `🧹 [${bot.phone}] Closing old WhatsApp socket: ${reason}`
+  );
+
+  try {
+
+    if (
+      typeof socket.ws?.close ===
+      "function"
+    ) {
+
+      socket.ws.close();
+
+    } else if (
+      typeof socket.end ===
+      "function"
+    ) {
+
+      socket.end(
+        new Error(
+          reason
+        )
+      );
+
+    }
+
+  } catch (error) {
+
+    console.warn(
+      `⚠️ [${bot.phone}] Error closing old socket:`,
+      error.message
+    );
+
+  }
+}
+
+// ======================================================
+// WATCHDOG RESTART
+// ======================================================
+
+async function restartBotFromWatchdog(
+  bot,
+  reason
+) {
+
+  if (!bot) {
+    return;
+  }
+
+  if (
+    bot.watchdogRestarting
+  ) {
+
+    console.log(
+      `⏳ [${bot.phone}] Watchdog restart already in progress.`
+    );
+
+    return;
+  }
+
+  const now =
+    Date.now();
+
+  if (
+    bot.lastWatchdogRestart &&
+    now -
+      bot.lastWatchdogRestart <
+      WATCHDOG_RESTART_COOLDOWN_MS
+  ) {
+
+    console.log(
+      `⏳ [${bot.phone}] Watchdog restart cooldown active.`
+    );
+
+    return;
+  }
+
+  bot.watchdogRestarting =
+    true;
+
+  bot.watchdogStatus =
+    "restarting";
+
+  bot.lastWatchdogRestart =
+    now;
+
+  bot.lastDisconnected =
+    now;
+
+  bot.isConnected =
+    false;
+
+  bot.starting =
+    false;
+
+  bot.reconnectAttempts =
+    0;
+
+  console.log("");
+  console.log(
+    "========================================"
+  );
+  console.log(
+    "🐕 WATCHDOG RECOVERY TRIGGERED"
+  );
+  console.log(
+    "========================================"
+  );
+  console.log(
+    `📞 Number: ${bot.phone}`
+  );
+  console.log(
+    `📛 Reason: ${reason}`
+  );
+  console.log(
+    "🔄 Restarting WhatsApp socket..."
+  );
+  console.log(
+    "========================================"
+  );
+
+  try {
+
+    await closeBotSocket(
+      bot,
+      `watchdog: ${reason}`
+    );
+
+  } catch (error) {
+
+    console.warn(
+      `⚠️ [${bot.phone}] Socket close warning:`,
+      error.message
+    );
+
+  }
+
+  bot.socket =
+    null;
+
+  // Give the old socket a moment to disappear
+  // before creating a new one.
+
+  await new Promise(
+    resolve =>
+      setTimeout(
+        resolve,
+        3000
+      )
+  );
+
+  bot.watchdogRestarting =
+    false;
+
+  try {
+
+    await startBotSession(
+      bot
+    );
+
+  } catch (error) {
+
+    console.error(
+      `❌ [${bot.phone}] Watchdog restart failed:`,
+      error.message
+    );
+
+    bot.watchdogRestarting =
+      false;
+
+    bot.watchdogStatus =
+      "restart-failed";
+
+    bot.reconnectAttempts++;
+
+    const delay =
+      Math.min(
+        5000 *
+        bot.reconnectAttempts,
+        60000
+      );
+
+    console.log(
+      `⏳ [${bot.phone}] Watchdog retry in ${
+        delay / 1000
+      } seconds...`
+    );
+
+    setTimeout(
+      () => {
+
+        if (
+          !bot.isConnected &&
+          !bot.starting
+        ) {
+
+          startBotSession(
+            bot
+          )
+            .catch(
+              retryError => {
+
+                console.error(
+                  `❌ [${bot.phone}] Watchdog retry failed:`,
+                  retryError.message
+                );
+
+              }
+            );
+
+        }
+
+      },
+      delay
+    );
+
+  }
+}
+
+// ======================================================
+// WATCHDOG CHECK
+// ======================================================
+
+async function watchdogCheck(
+  bot
+) {
+
+  if (!bot) {
+    return;
+  }
+
+  const now =
+    Date.now();
+
+  bot.lastWatchdogCheck =
+    now;
+
+  // ----------------------------------------------------
+  // Ignore sessions that are still starting.
+  // ----------------------------------------------------
+
+  if (
+    bot.starting ||
+    bot.watchdogRestarting
+  ) {
+
+    bot.watchdogStatus =
+      bot.watchdogRestarting
+        ? "restarting"
+        : "starting";
+
+    return;
+  }
+
+  // ----------------------------------------------------
+  // Not connected
+  // ----------------------------------------------------
+
+  if (
+    !bot.isConnected
+  ) {
+
+    bot.watchdogStatus =
+      "waiting-for-connection";
+
+    return;
+  }
+
+  // ----------------------------------------------------
+  // Socket disappeared while the state still says
+  // connected.
+  // ----------------------------------------------------
+
+  if (!bot.socket) {
+
+    bot.watchdogStatus =
+      "socket-missing";
+
+    await restartBotFromWatchdog(
+      bot,
+      "socket missing while marked connected"
+    );
+
+    return;
+  }
+
+  // ----------------------------------------------------
+  // Startup grace period
+  // ----------------------------------------------------
+
+  if (
+    bot.lastConnected &&
+    now -
+      bot.lastConnected <
+      WATCHDOG_STARTUP_GRACE_MS
+  ) {
+
+    bot.watchdogStatus =
+      "startup-grace";
+
+    return;
+  }
+
+  // ----------------------------------------------------
+  // Determine inactivity.
+  // ----------------------------------------------------
+
+  const lastActivity =
+    bot.lastActivity ||
+    bot.lastConnected ||
+    now;
+
+  const inactiveFor =
+    now -
+    lastActivity;
+
+  // ----------------------------------------------------
+  // IMPORTANT:
+  //
+  // We do NOT restart merely because the owner hasn't
+  // sent a command.
+  //
+  // If the socket is still receiving normal connection
+  // activity, connection.update events keep refreshing
+  // lastActivity.
+  //
+  // Only a genuinely stale socket reaches this point.
+  // ----------------------------------------------------
+
+  if (
+    inactiveFor <
+    WATCHDOG_STALE_MS
+  ) {
+
+    bot.watchdogStatus =
+      "healthy";
+
+    return;
+  }
+
+  // ----------------------------------------------------
+  // Stale connection
+  // ----------------------------------------------------
+
+  bot.watchdogStatus =
+    "stale";
+
+  console.warn("");
+  console.warn(
+    "========================================"
+  );
+  console.warn(
+    "⚠️ WATCHDOG DETECTED STALE CONNECTION"
+  );
+  console.warn(
+    "========================================"
+  );
+  console.warn(
+    `📞 Number: ${bot.phone}`
+  );
+  console.warn(
+    `⏱️ Inactive for: ${
+      Math.floor(
+        inactiveFor / 1000
+      )
+    } seconds`
+  );
+  console.warn(
+    `📌 Last activity: ${
+      bot.lastActivity
+        ? new Date(
+            bot.lastActivity
+          ).toISOString()
+        : "unknown"
+    }`
+  );
+  console.warn(
+    `📌 Last activity reason: ${
+      bot.lastActivityReason ||
+      "unknown"
+    }`
+  );
+  console.warn(
+    "🔄 Recovery will be attempted."
+  );
+  console.warn(
+    "========================================"
+  );
+
+  await restartBotFromWatchdog(
+    bot,
+    `no WhatsApp activity for ${
+      Math.floor(
+        inactiveFor / 1000
+      )
+    } seconds`
+  );
+}
+
+// ======================================================
+// START WATCHDOG
+// ======================================================
+
+const watchdogTimer =
+  setInterval(
+    async () => {
+
+      try {
+
+        const bots =
+          Array.from(
+            sessions.values()
+          );
+
+        for (
+          const bot of bots
+        ) {
+
+          try {
+
+            await watchdogCheck(
+              bot
+            );
+
+          } catch (error) {
+
+            console.error(
+              `❌ Watchdog error for ${bot.phone}:`,
+              error.message
+            );
+
+          }
+
+        }
+
+      } catch (error) {
+
+        console.error(
+          "❌ Global watchdog error:",
+          error.message
+        );
+
+      }
+
+    },
+    WATCHDOG_INTERVAL_MS
+  );
+
+// Prevent Node from keeping itself alive solely because
+// of this timer in unusual shutdown situations.
+
+if (
+  typeof watchdogTimer.unref ===
+  "function"
+) {
+
+  watchdogTimer.unref();
+
+}
+
+// ======================================================
 // START BOT SESSION
 // ======================================================
 
@@ -1693,7 +2314,9 @@ async function startBotSession(
     return;
   }
 
-  if (bot.starting) {
+  if (
+    bot.starting
+  ) {
 
     console.log(
       `⚠️ Session ${bot.phone} is already starting.`
@@ -1704,6 +2327,9 @@ async function startBotSession(
 
   bot.starting =
     true;
+
+  bot.watchdogStatus =
+    "starting";
 
   try {
 
@@ -1777,10 +2403,26 @@ async function startBotSession(
     );
 
     // ==================================================
+    // SOCKET GENERATION
+    // ==================================================
+    //
+    // Every new socket gets a unique generation number.
+    //
+    // This helps prevent old socket events from causing
+    // confusion after the watchdog has created a new socket.
+    //
+    // ==================================================
+
+    bot.socketGeneration++;
+
+    const socketGeneration =
+      bot.socketGeneration;
+
+    // ==================================================
     // CREATE SOCKET
     // ==================================================
 
-    bot.socket =
+    const socket =
       makeWASocket({
 
         version,
@@ -1829,17 +2471,30 @@ async function startBotSession(
 
       });
 
+    bot.socket =
+      socket;
+
+    touchBotActivity(
+      bot,
+      "socket-created"
+    );
+
     // ==================================================
     // SAVE CREDENTIALS
     // ==================================================
 
-    bot.socket.ev.on(
+    socket.ev.on(
       "creds.update",
       async () => {
 
         try {
 
           await saveCreds();
+
+          touchBotActivity(
+            bot,
+            "credentials-updated"
+          );
 
         } catch (error) {
 
@@ -1857,16 +2512,34 @@ async function startBotSession(
     // CONNECTION UPDATE
     // ==================================================
 
-    bot.socket.ev.on(
+    socket.ev.on(
       "connection.update",
       async update => {
 
         try {
 
+          // Ignore events from an old socket.
+
+          if (
+            socketGeneration !==
+            bot.socketGeneration
+          ) {
+
+            return;
+          }
+
           const {
             connection,
             lastDisconnect
           } = update;
+
+          // Any connection update proves that
+          // the WhatsApp layer is still communicating.
+
+          touchBotActivity(
+            bot,
+            `connection-update:${connection || "unknown"}`
+          );
 
           // --------------------------------------------
           // CONNECTING
@@ -1876,6 +2549,9 @@ async function startBotSession(
             connection ===
             "connecting"
           ) {
+
+            bot.watchdogStatus =
+              "connecting";
 
             console.log(
               `🔄 ${bot.phone} connecting to WhatsApp...`
@@ -1906,6 +2582,18 @@ async function startBotSession(
 
             bot.pairingRequested =
               true;
+
+            bot.lastConnected =
+              Date.now();
+
+            bot.lastActivity =
+              Date.now();
+
+            bot.lastActivityReason =
+              "connection-open";
+
+            bot.watchdogStatus =
+              "healthy";
 
             console.log("");
             console.log(
@@ -1938,6 +2626,9 @@ async function startBotSession(
               }`
             );
             console.log(
+              "🐕 Watchdog: ACTIVE"
+            );
+            console.log(
               "========================================"
             );
             console.log("");
@@ -1958,6 +2649,18 @@ async function startBotSession(
 
             bot.isConnected =
               false;
+
+            bot.lastDisconnected =
+              Date.now();
+
+            bot.lastActivity =
+              Date.now();
+
+            bot.lastActivityReason =
+              "connection-closed";
+
+            bot.watchdogStatus =
+              "disconnected";
 
             const statusCode =
               lastDisconnect
@@ -2011,6 +2714,9 @@ async function startBotSession(
                 `🧹 Session retained but automatic reconnect stopped.`
               );
 
+              bot.watchdogStatus =
+                "logged-out";
+
               return;
             }
 
@@ -2030,6 +2736,9 @@ async function startBotSession(
               console.log(
                 "🧹 Delete this customer's session and pair again."
               );
+
+              bot.watchdogStatus =
+                "bad-session";
 
               return;
             }
@@ -2051,12 +2760,26 @@ async function startBotSession(
                 "🚫 Automatic reconnect stopped."
               );
 
+              bot.watchdogStatus =
+                "connection-replaced";
+
               return;
             }
 
             // ------------------------------------------
             // RECONNECT
             // ------------------------------------------
+
+            if (
+              bot.watchdogRestarting
+            ) {
+
+              console.log(
+                `🐕 [${bot.phone}] Close event came from watchdog restart.`
+              );
+
+              return;
+            }
 
             bot.reconnectAttempts++;
 
@@ -2075,6 +2798,15 @@ async function startBotSession(
 
             setTimeout(
               () => {
+
+                if (
+                  bot.isConnected ||
+                  bot.starting ||
+                  bot.watchdogRestarting
+                ) {
+
+                  return;
+                }
 
                 startBotSession(
                   bot
@@ -2192,7 +2924,7 @@ async function startBotSession(
     // MESSAGE EVENTS
     // ==================================================
 
-    bot.socket.ev.on(
+    socket.ev.on(
       "messages.upsert",
       async ({
         messages
@@ -2207,6 +2939,11 @@ async function startBotSession(
           ) {
             return;
           }
+
+          touchBotActivity(
+            bot,
+            "messages-upsert"
+          );
 
           for (
             const msg of messages
@@ -2260,6 +2997,11 @@ async function startBotSession(
                     msg.key
                   ]);
 
+                  touchBotActivity(
+                    bot,
+                    "status-viewed"
+                  );
+
                   console.log(
                     `👁️ [${bot.phone}] Viewed status from ${poster}`
                   );
@@ -2301,6 +3043,11 @@ async function startBotSession(
                       }
                     );
 
+                    touchBotActivity(
+                      bot,
+                      "status-reaction-sent"
+                    );
+
                     console.log(
                       `❤️ [${bot.phone}] Reacted ${reaction} to status from ${poster}`
                     );
@@ -2336,25 +3083,6 @@ async function startBotSession(
               // ==================================================
               // SELF CHAT DETECTION
               // ==================================================
-
-              /*
-               * This is the important part for:
-               *
-               * You → Your own WhatsApp number
-               *
-               * Baileys marks messages sent by your own account
-               * as fromMe.
-               *
-               * We allow ONLY the bot's own JID to pass through
-               * for commands such as:
-               *
-               * .menu
-               * .set autoreact true
-               * .set autoreact false
-               *
-               * We do NOT allow normal self-chat messages to
-               * trigger automatic reactions.
-               */
 
               const isSelfChat =
                 jidToPhone(
@@ -2500,6 +3228,11 @@ async function startBotSession(
                       }
                     );
 
+                    touchBotActivity(
+                      bot,
+                      "owner-only-settings-response"
+                    );
+
                   } catch (error) {
 
                     console.error(
@@ -2544,6 +3277,11 @@ async function startBotSession(
                       }
                     );
 
+                    touchBotActivity(
+                      bot,
+                      "settings-help-response"
+                    );
+
                   } catch (error) {
 
                     console.error(
@@ -2565,10 +3303,6 @@ async function startBotSession(
                   "autoreact"
                 ) {
 
-                  // ----------------------------------------------
-                  // No valid value
-                  // ----------------------------------------------
-
                   if (
                     value !== "true" &&
                     value !== "false"
@@ -2588,6 +3322,11 @@ async function startBotSession(
                         }
                       );
 
+                      touchBotActivity(
+                        bot,
+                        "autoreact-help-response"
+                      );
+
                     } catch (error) {
 
                       console.error(
@@ -2599,10 +3338,6 @@ async function startBotSession(
 
                     continue;
                   }
-
-                  // ----------------------------------------------
-                  // Set value
-                  // ----------------------------------------------
 
                   bot.autoReact =
                     value === "true";
@@ -2618,6 +3353,11 @@ async function startBotSession(
                             ? "❤️ *Auto React ENABLED* ✅\n\nThe bot will now automatically react to messages and statuses when your plan allows it.\n\nUse `.menu` to view all settings."
                             : "🔕 *Auto React DISABLED* ❌\n\nThe bot will no longer automatically react to messages or statuses.\n\nUse `.menu` to view all settings."
                       }
+                    );
+
+                    touchBotActivity(
+                      bot,
+                      "autoreact-setting-changed"
                     );
 
                   } catch (error) {
@@ -2657,6 +3397,11 @@ async function startBotSession(
                           true
                         )
                     }
+                  );
+
+                  touchBotActivity(
+                    bot,
+                    "unknown-setting-response"
                   );
 
                 } catch (error) {
@@ -2707,6 +3452,11 @@ async function startBotSession(
                     }
                   );
 
+                  touchBotActivity(
+                    bot,
+                    "menu-response"
+                  );
+
                 } catch (error) {
 
                   console.error(
@@ -2722,12 +3472,6 @@ async function startBotSession(
               // ==================================================
               // SETTINGS COMMAND SHORTCUT
               // ==================================================
-
-              /*
-               * .settings
-               *
-               * This is an additional convenience command.
-               */
 
               if (
                 command ===
@@ -2748,6 +3492,11 @@ async function startBotSession(
                     }
                   );
 
+                  touchBotActivity(
+                    bot,
+                    "settings-response"
+                  );
+
                 } catch (error) {
 
                   console.error(
@@ -2763,28 +3512,6 @@ async function startBotSession(
               // ==================================================
               // SELF CHAT COMMAND PROTECTION
               // ==================================================
-
-              /*
-               * Do not auto-react to the bot owner's own messages.
-               *
-               * This means:
-               *
-               * You send:
-               *
-               * .menu
-               *
-               * to yourself
-               *
-               * The bot responds.
-               *
-               * But if you send:
-               *
-               * hello
-               *
-               * to yourself,
-               *
-               * it will NOT react to that message.
-               */
 
               if (
                 isSelfChat
@@ -2819,6 +3546,11 @@ async function startBotSession(
                           msg.key
                       }
                     }
+                  );
+
+                  touchBotActivity(
+                    bot,
+                    "message-reaction-sent"
                   );
 
                   console.log(
@@ -2863,6 +3595,11 @@ async function startBotSession(
                         "🏓 Pong!\n\n" +
                         `🤖 ${config.botname} is online ✅`
                     }
+                  );
+
+                  touchBotActivity(
+                    bot,
+                    "ping-response"
                   );
 
                 } catch (error) {
@@ -2918,6 +3655,11 @@ async function startBotSession(
                       }
                     );
 
+                    touchBotActivity(
+                      bot,
+                      "owner-upgrade-response"
+                    );
+
                   } catch (error) {
 
                     console.error(
@@ -2954,6 +3696,11 @@ async function startBotSession(
                           "⭐ You already have PRO access!\n\n" +
                           `⏳ Remaining: ${days} day(s).`
                       }
+                    );
+
+                    touchBotActivity(
+                      bot,
+                      "pro-status-response"
                     );
 
                   } catch (error) {
@@ -3001,6 +3748,11 @@ async function startBotSession(
                     }
                   );
 
+                  touchBotActivity(
+                    bot,
+                    "upgrade-payment-link-sent"
+                  );
+
                 } catch (error) {
 
                   console.error(
@@ -3018,6 +3770,11 @@ async function startBotSession(
                           "⚠️ Payment is temporarily unavailable.\n\n" +
                           "Please try again later."
                       }
+                    );
+
+                    touchBotActivity(
+                      bot,
+                      "upgrade-error-response"
                     );
 
                   } catch (sendError) {
@@ -3060,6 +3817,11 @@ async function startBotSession(
                           "🔒 *PRO FEATURE*\n\n" +
                           `⭐ ${config.prefix}upgrade to unlock ${config.prefix}quote.`
                       }
+                    );
+
+                    touchBotActivity(
+                      bot,
+                      "quote-access-response"
                     );
 
                   } catch (error) {
@@ -3110,6 +3872,11 @@ async function startBotSession(
                     }
                   );
 
+                  touchBotActivity(
+                    bot,
+                    "quote-response"
+                  );
+
                 } catch (error) {
 
                   console.error(
@@ -3153,6 +3920,9 @@ async function startBotSession(
     bot.isConnected =
       false;
 
+    bot.watchdogStatus =
+      "start-failed";
+
     console.error("");
     console.error(
       "========================================"
@@ -3191,6 +3961,15 @@ async function startBotSession(
 
     setTimeout(
       () => {
+
+        if (
+          bot.isConnected ||
+          bot.starting ||
+          bot.watchdogRestarting
+        ) {
+
+          return;
+        }
 
         startBotSession(
           bot
@@ -3343,6 +4122,73 @@ process.on(
 );
 
 // ======================================================
+// GRACEFUL SHUTDOWN
+// ======================================================
+
+async function shutdown(
+  signal
+) {
+
+  console.log("");
+  console.log(
+    `🛑 ${signal} received. Shutting down...`
+  );
+
+  try {
+
+    for (
+      const bot of sessions.values()
+    ) {
+
+      try {
+
+        if (
+          bot.socket
+        ) {
+
+          await closeBotSocket(
+            bot,
+            `process shutdown: ${signal}`
+          );
+
+        }
+
+      } catch (error) {
+
+        console.warn(
+          `⚠️ Could not close ${bot.phone}:`,
+          error.message
+        );
+
+      }
+
+    }
+
+  } catch (error) {
+
+    console.error(
+      "❌ Shutdown error:",
+      error.message
+    );
+
+  }
+
+  process.exit(
+    0
+  );
+}
+
+process.once(
+  "SIGTERM",
+  () => shutdown("SIGTERM")
+);
+
+process.once(
+  "SIGINT",
+  () => shutdown("SIGINT")
+);
+
+// ======================================================
 // START
 // ======================================================
 
@@ -3351,6 +4197,22 @@ console.log(
   `🚀 ${config.botname} is starting...`
 );
 console.log("");
+
+console.log(
+  "🐕 WhatsApp watchdog initialized."
+);
+
+console.log(
+  `⏱️ Watchdog interval: ${
+    WATCHDOG_INTERVAL_MS / 1000
+  } seconds`
+);
+
+console.log(
+  `⚠️ Stale threshold: ${
+    WATCHDOG_STALE_MS / 1000
+  } seconds`
+);
 
 try {
 
