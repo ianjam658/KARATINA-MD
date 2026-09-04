@@ -343,7 +343,7 @@ async function startBot() {
             );
 
             console.log(
-              "��� Link with phone number instead"
+              "🔗 Link with phone number instead"
             );
 
             console.log(
