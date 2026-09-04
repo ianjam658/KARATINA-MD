@@ -2,22 +2,6 @@
  * ============================================================
  * CYPHER-X FEATURE ACCESS SYSTEM
  * ============================================================
- *
- * FREE:
- * - Basic bot interaction
- * - View incoming messages
- * - Auto reactions
- * - Status viewing
- * - Ping
- * - Menu
- * - Upgrade
- *
- * PRO:
- * - Premium commands/features
- *
- * IMPORTANT:
- * Any feature not explicitly listed below is PRO by default.
- * This prevents accidentally making a new premium feature free.
  */
 
 const TIERS = Object.freeze({
@@ -31,10 +15,7 @@ const TIERS = Object.freeze({
 
 const FEATURE_REQUIREMENTS = Object.freeze({
 
-  // -------------------------
-  // FREE FEATURES
-  // -------------------------
-
+  // FREE
   viewMessages: TIERS.FREE,
   reactToMessage: TIERS.FREE,
   viewStatus: TIERS.FREE,
@@ -43,19 +24,8 @@ const FEATURE_REQUIREMENTS = Object.freeze({
   menu: TIERS.FREE,
   upgrade: TIERS.FREE,
 
-  // -------------------------
-  // PRO FEATURES
-  // -------------------------
-
+  // PRO
   quote: TIERS.PRO
-
-  // Add future PRO features here, for example:
-  //
-  // ai: TIERS.PRO,
-  // downloader: TIERS.PRO,
-  // sticker: TIERS.PRO,
-  // groupTools: TIERS.PRO,
-  // ownerTools: TIERS.PRO
 });
 
 // ============================================================
@@ -68,12 +38,10 @@ const TIER_RANK = Object.freeze({
 });
 
 // ============================================================
-// CHECK FEATURE ACCESS
+// CHECK ACCESS
 // ============================================================
 
 function hasAccess(userTier, featureName) {
-
-  // Unknown features are PRO by default.
   const requiredTier =
     FEATURE_REQUIREMENTS[featureName] ?? TIERS.PRO;
 
@@ -87,11 +55,10 @@ function hasAccess(userTier, featureName) {
 }
 
 // ============================================================
-// GET REQUIRED TIER
+// REQUIRED TIER
 // ============================================================
 
 function getRequiredTier(featureName) {
-
   return (
     FEATURE_REQUIREMENTS[featureName] ??
     TIERS.PRO
@@ -99,11 +66,10 @@ function getRequiredTier(featureName) {
 }
 
 // ============================================================
-// CHECK WHETHER A TIER EXISTS
+// VALID TIER
 // ============================================================
 
 function isValidTier(tier) {
-
   return Object.values(TIERS).includes(tier);
 }
 
