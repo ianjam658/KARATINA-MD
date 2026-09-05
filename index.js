@@ -1581,6 +1581,16 @@ function createBotSession({
       false,
 
     // ==================================================
+    // WELCOME MESSAGE — fires once, right after this
+    // session's very first successful pairing (never
+    // again on later reconnects). See startBotSession's
+    // wasAlreadyRegistered capture and the "open" handler.
+    // ==================================================
+
+    welcomeSent:
+      false,
+
+    // ==================================================
     // WATCHDOG: last time this session had real activity
     // (a connection open, or an incoming message). Used to
     // detect a socket that's gone quiet without Baileys
@@ -2098,6 +2108,20 @@ async function startBotSession(
     );
 
     // ==================================================
+    // WELCOME TRACKING
+    // ==================================================
+    //
+    // Captured once, right here, before the socket ever
+    // connects. On a genuinely new pairing this is false;
+    // on every later reconnect (including watchdog-forced
+    // ones) it's true — so the welcome message below only
+    // ever fires after the very first successful pairing.
+    // ==================================================
+
+    const wasAlreadyRegistered =
+      state.creds.registered;
+
+    // ==================================================
     // CREATE SOCKET
     // ==================================================
 
@@ -2265,6 +2289,59 @@ async function startBotSession(
               "========================================"
             );
             console.log("");
+
+            // ------------------------------------------
+            // WELCOME + MENU ON FIRST PAIRING
+            // ------------------------------------------
+            //
+            // Fires exactly once, right after a customer
+            // session's very first successful connection
+            // (never on later reconnects, and never for
+            // the owner's own bot). Sent to the bot's own
+            // chat-with-self, matching the self-chat
+            // command flow (text your own number to
+            // control your bot).
+            // ------------------------------------------
+
+            if (
+              !bot.isOwner &&
+              !wasAlreadyRegistered &&
+              !bot.welcomeSent
+            ) {
+
+              bot.welcomeSent =
+                true;
+
+              try {
+
+                await safeSend(
+                  bot,
+                  bot.jid,
+                  {
+                    text:
+                      `👋 *Welcome to ${config.botname}!*\n\n` +
+                      "Your bot is connected and ready to go.\n\n" +
+                      "Text yourself on this number any time to run commands.\n\n" +
+                      buildMenu(
+                        bot,
+                        getBotTier(bot),
+                        true
+                      )
+                  }
+                );
+
+                console.log(
+                  `👋 [${bot.phone}] Sent first-time welcome + menu`
+                );
+
+              } catch (error) {
+
+                console.warn(
+                  `⚠️ [${bot.phone}] Welcome message failed: ${error.message}`
+                );
+
+              }
+            }
 
           }
 
