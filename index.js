@@ -996,6 +996,28 @@ app.post(
           });
       }
 
+      // --------------------------------------------------
+      // REJECT LOCAL-FORMAT NUMBERS
+      // --------------------------------------------------
+      //
+      // A number starting with "0" (e.g. 0787132528) is
+      // local format, not international — it's missing the
+      // country code. WhatsApp pairing will never succeed
+      // for it; it just retries forever. Catch this early
+      // with a clear message instead of silently failing.
+
+      if (
+        phone.startsWith("0")
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "That looks like a local number. Include your country code with no leading 0 — e.g. 254712345678 instead of 0712345678."
+          });
+      }
+
       if (
         phone ===
         getOwnerPhone()
@@ -1408,6 +1430,414 @@ app.post(
 );
 
 // ======================================================
+// ADMIN: VIEW / CHANGE SETTINGS OVER HTTP
+// ======================================================
+//
+// A second, fully reliable way to control your own bot's
+// settings — this never depends on WhatsApp self-chat
+// message delivery, which is genuinely outside anyone's
+// control to make more reliable (WhatsApp's own multi-
+// device self-chat sync, not this code). Protected by
+// ADMIN_KEY so only you can use it. Deliberately can't
+// touch antiDelete/viewOnce — those stay owner-only
+// through WhatsApp itself, not exposed via a second path.
+// ======================================================
+
+app.get(
+  "/api/admin/settings",
+  (req, res) => {
+
+    try {
+
+      const adminKey =
+        process.env.ADMIN_KEY;
+
+      if (!adminKey) {
+
+        return res
+          .status(500)
+          .json({
+            error:
+              "ADMIN_KEY is not configured on the server."
+          });
+      }
+
+      if (
+        req.headers["x-admin-key"] !==
+        adminKey
+      ) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized."
+          });
+      }
+
+      const phone =
+        normalizePhone(
+          req.query?.phone
+        );
+
+      if (!phone) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Provide ?phone=<number>."
+          });
+      }
+
+      const bot =
+        findBotForPhone(
+          phone
+        );
+
+      if (!bot) {
+
+        return res
+          .status(404)
+          .json({
+            error:
+              `No session found for ${phone}.`
+          });
+      }
+
+      const definitions =
+        getSettableDefinitions();
+
+      const settings = {};
+
+      for (
+        const name of Object.keys(
+          definitions
+        )
+      ) {
+
+        settings[name] =
+          Boolean(
+            bot[
+              definitions[name].field
+            ]
+          );
+      }
+
+      return res
+        .status(200)
+        .json({
+          phone:
+            bot.phone,
+          isOwner:
+            bot.isOwner,
+          isConnected:
+            bot.isConnected,
+          tier:
+            getBotTier(bot),
+          settings
+        });
+
+    } catch (error) {
+
+      console.error(
+        "❌ Admin settings-read error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          error:
+            error.message ||
+            "Failed to read settings."
+        });
+    }
+  }
+);
+
+app.post(
+  "/api/admin/set",
+  (req, res) => {
+
+    try {
+
+      const adminKey =
+        process.env.ADMIN_KEY;
+
+      if (!adminKey) {
+
+        return res
+          .status(500)
+          .json({
+            error:
+              "ADMIN_KEY is not configured on the server."
+          });
+      }
+
+      if (
+        req.headers["x-admin-key"] !==
+        adminKey
+      ) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized."
+          });
+      }
+
+      const phone =
+        normalizePhone(
+          req.body?.phone
+        );
+
+      const setting =
+        String(
+          req.body?.setting || ""
+        ).toLowerCase();
+
+      if (!phone || !setting) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Provide { phone, setting, value } in the request body."
+          });
+      }
+
+      if (
+        typeof req.body?.value !==
+        "boolean"
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "\"value\" must be true or false."
+          });
+      }
+
+      if (
+        !WEB_ADMIN_ALLOWED_SETTINGS.includes(
+          setting
+        )
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              `"${setting}" can't be changed over the web admin endpoint. Allowed: ${WEB_ADMIN_ALLOWED_SETTINGS.join(", ")}.`
+          });
+      }
+
+      const bot =
+        findBotForPhone(
+          phone
+        );
+
+      if (!bot) {
+
+        return res
+          .status(404)
+          .json({
+            error:
+              `No session found for ${phone}.`
+          });
+      }
+
+      const definitions =
+        getSettableDefinitions();
+
+      const settingDef =
+        definitions[setting];
+
+      const wantsOn =
+        req.body.value;
+
+      if (
+        wantsOn &&
+        !hasAccess(
+          getBotTier(bot),
+          settingDef.feature
+        )
+      ) {
+
+        return res
+          .status(403)
+          .json({
+            error:
+              `"${setting}" needs a PRO plan for this bot before it can be turned on.`
+          });
+      }
+
+      bot[settingDef.field] =
+        wantsOn;
+
+      console.log(
+        `⚙️ [admin] [${bot.phone}] ${setting}: ${
+          wantsOn ? "ON" : "OFF"
+        }`
+      );
+
+      return res
+        .status(200)
+        .json({
+          success: true,
+          phone:
+            bot.phone,
+          setting,
+          value:
+            wantsOn
+        });
+
+    } catch (error) {
+
+      console.error(
+        "❌ Admin set error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          error:
+            error.message ||
+            "Failed to change setting."
+        });
+    }
+  }
+);
+
+// ======================================================
+// ADMIN: DELETE A SESSION (free-tier-friendly, no shell needed)
+// ======================================================
+
+app.post(
+  "/api/admin/delete-session",
+  (req, res) => {
+
+    try {
+
+      const adminKey =
+        process.env.ADMIN_KEY;
+
+      if (!adminKey) {
+
+        return res
+          .status(500)
+          .json({
+            error:
+              "ADMIN_KEY is not configured on the server."
+          });
+      }
+
+      if (
+        req.headers["x-admin-key"] !==
+        adminKey
+      ) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized."
+          });
+      }
+
+      const phone =
+        normalizePhone(
+          req.body?.phone
+        );
+
+      if (!phone) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Provide a valid phone number."
+          });
+      }
+
+      if (
+        phone ===
+        getOwnerPhone()
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Refusing to delete the owner session this way — do that manually if you really mean to."
+          });
+      }
+
+      const dir =
+        getCustomerSessionDir(
+          phone
+        );
+
+      if (
+        !fs.existsSync(dir)
+      ) {
+
+        return res
+          .status(404)
+          .json({
+            error:
+              `No session folder found for ${phone}.`
+          });
+      }
+
+      fs.rmSync(
+        dir,
+        {
+          recursive: true,
+          force: true
+        }
+      );
+
+      sessions.delete(
+        phone
+      );
+
+      console.log(
+        `🧹 [admin] Deleted session folder for ${phone}`
+      );
+
+      return res
+        .status(200)
+        .json({
+          success: true,
+          phone,
+          message:
+            "Session deleted. It will re-pair fresh next time."
+        });
+
+    } catch (error) {
+
+      console.error(
+        "❌ Admin delete-session error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          error:
+            error.message ||
+            "Failed to delete session."
+        });
+    }
+  }
+);
+
+// ======================================================
 // START WEB SERVER
 // ======================================================
 
@@ -1538,6 +1968,117 @@ async function requestPairingCode(
     throw error;
   }
 }
+
+// ======================================================
+// SETTABLE DEFINITIONS (shared)
+// ======================================================
+//
+// Every toggleable setting lives here: which bot field it
+// flips, which PRO feature (if any) gates turning it ON,
+// and the on/off confirmation text. Used by both the
+// self-chat `.set` command and the web admin endpoint
+// below, so the two can never drift out of sync. Adding a
+// new toggle later means adding one entry here — nothing
+// else needs to change.
+// ======================================================
+
+function getSettableDefinitions() {
+
+  return {
+
+    autoreact: {
+      field: "autoReact",
+      feature: "reactToMessage",
+      onText:
+        "❤️ *Auto React ENABLED* ✅\n\nThe bot will now automatically react to chat messages.\n\nUse `.menu` to view all settings.",
+      offText:
+        "🔕 *Auto React DISABLED* ❌\n\nThe bot will no longer automatically react to chat messages.\n\nUse `.menu` to view all settings."
+    },
+
+    statusreact: {
+      field: "statusReact",
+      feature: "statusReact",
+      onText:
+        "❤️ *Status Auto React ENABLED* ✅\n\nThe bot will now react to contacts' statuses.",
+      offText:
+        "🔕 *Status Auto React DISABLED* ❌"
+    },
+
+    statusforward: {
+      field: "statusForward",
+      feature: "statusForward",
+      onText:
+        "📡 *Status Forwarding ENABLED* ✅\n\nContacts' statuses will now be copied into this bot account's own chat.",
+      offText:
+        "📡 *Status Forwarding DISABLED* ❌"
+    },
+
+    antidelete: {
+      field: "antiDelete",
+      feature: "antiDelete",
+      onText:
+        "🗑️ *Anti-Delete ENABLED* ✅\n\nDeleted messages will be recovered and reposted, where possible.",
+      offText:
+        "🗑️ *Anti-Delete DISABLED* ❌"
+    },
+
+    viewonce: {
+      field: "viewOnce",
+      feature: "viewOnce",
+      onText:
+        "🔓 *View-Once Reveal ENABLED* ✅\n\nView-once media will be unlocked and reposted automatically.",
+      offText:
+        "🔓 *View-Once Reveal DISABLED* ❌"
+    },
+
+    callreject: {
+      field: "callReject",
+      feature: "callReject",
+      onText:
+        "📵 *Auto-Reject Calls ENABLED* ✅\n\nIncoming calls to this number will be rejected automatically.",
+      offText:
+        "📵 *Auto-Reject Calls DISABLED* ❌"
+    },
+
+    welcome: {
+      field: "welcomeMembers",
+      feature: "welcomeMembers",
+      onText:
+        "👋 *Welcome Messages ENABLED* ✅\n\nNew group members will get an automatic welcome.",
+      offText:
+        "👋 *Welcome Messages DISABLED* ❌"
+    },
+
+    channelreact: {
+      field: "channelReact",
+      feature: "channelReact",
+      onText:
+        "❤️ *Channel Auto React ENABLED* ✅\n\nThe bot will react to posts in channels it follows, where WhatsApp allows it.",
+      offText:
+        "❤️ *Channel Auto React DISABLED* ❌"
+    }
+
+  };
+}
+
+// ======================================================
+// WEB-ADMIN-SAFE SETTINGS
+// ======================================================
+//
+// Subset of SETTABLE that the HTTP admin endpoint below is
+// allowed to toggle. Deliberately excludes antidelete and
+// viewonce — those stay owner-only through WhatsApp itself,
+// not exposed through an additional web-based control path.
+// ======================================================
+
+const WEB_ADMIN_ALLOWED_SETTINGS = [
+  "autoreact",
+  "statusreact",
+  "statusforward",
+  "callreject",
+  "welcome",
+  "channelreact"
+];
 
 // ======================================================
 // CREATE BOT SESSION
@@ -3546,81 +4087,8 @@ async function startBotSession(
                 // Adding a new toggle later means adding one entry
                 // here — nothing else about .set needs to change.
 
-                const SETTABLE = {
-
-                  autoreact: {
-                    field: "autoReact",
-                    feature: "reactToMessage",
-                    onText:
-                      "❤️ *Auto React ENABLED* ✅\n\nThe bot will now automatically react to chat messages.\n\nUse `.menu` to view all settings.",
-                    offText:
-                      "🔕 *Auto React DISABLED* ❌\n\nThe bot will no longer automatically react to chat messages.\n\nUse `.menu` to view all settings."
-                  },
-
-                  statusreact: {
-                    field: "statusReact",
-                    feature: "statusReact",
-                    onText:
-                      "❤️ *Status Auto React ENABLED* ✅\n\nThe bot will now react to contacts' statuses.",
-                    offText:
-                      "🔕 *Status Auto React DISABLED* ❌"
-                  },
-
-                  statusforward: {
-                    field: "statusForward",
-                    feature: "statusForward",
-                    onText:
-                      "📡 *Status Forwarding ENABLED* ✅\n\nContacts' statuses will now be copied into this bot account's own chat.",
-                    offText:
-                      "📡 *Status Forwarding DISABLED* ❌"
-                  },
-
-                  antidelete: {
-                    field: "antiDelete",
-                    feature: "antiDelete",
-                    onText:
-                      "🗑️ *Anti-Delete ENABLED* ✅\n\nDeleted messages will be recovered and reposted, where possible.",
-                    offText:
-                      "🗑️ *Anti-Delete DISABLED* ❌"
-                  },
-
-                  viewonce: {
-                    field: "viewOnce",
-                    feature: "viewOnce",
-                    onText:
-                      "🔓 *View-Once Reveal ENABLED* ✅\n\nView-once media will be unlocked and reposted automatically.",
-                    offText:
-                      "🔓 *View-Once Reveal DISABLED* ❌"
-                  },
-
-                  callreject: {
-                    field: "callReject",
-                    feature: "callReject",
-                    onText:
-                      "📵 *Auto-Reject Calls ENABLED* ✅\n\nIncoming calls to this number will be rejected automatically.",
-                    offText:
-                      "📵 *Auto-Reject Calls DISABLED* ❌"
-                  },
-
-                  welcome: {
-                    field: "welcomeMembers",
-                    feature: "welcomeMembers",
-                    onText:
-                      "👋 *Welcome Messages ENABLED* ✅\n\nNew group members will get an automatic welcome.",
-                    offText:
-                      "👋 *Welcome Messages DISABLED* ❌"
-                  },
-
-                  channelreact: {
-                    field: "channelReact",
-                    feature: "channelReact",
-                    onText:
-                      "❤️ *Channel Auto React ENABLED* ✅\n\nThe bot will react to posts in channels it follows, where WhatsApp allows it.",
-                    offText:
-                      "❤️ *Channel Auto React DISABLED* ❌"
-                  }
-
-                };
+                const SETTABLE =
+                  getSettableDefinitions();
 
                 const settingDef =
                   SETTABLE[setting];
@@ -4084,8 +4552,16 @@ async function startBotSession(
 
                   console.error(
                     `❌ [${bot.phone}] Upgrade error:`,
-                    error.message
+                    error.message ||
+                      error
                   );
+
+                  if (error.stack) {
+
+                    console.error(
+                      error.stack
+                    );
+                  }
 
                   try {
 
