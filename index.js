@@ -1502,6 +1502,29 @@ async function requestPairingCode(
       "========================================"
     );
 
+    // ==================================================
+    // WELCOME TRACKING
+    // ==================================================
+    //
+    // Set here, on the bot object itself, instead of
+    // relying on state.creds.registered at the top of
+    // startBotSession. Baileys always does one internal
+    // stream restart right after a pairing code is
+    // entered — by the time the *next* startBotSession
+    // call reaches "open", creds.registered already reads
+    // true (saved during the attempt that requested this
+    // code), which would make wasAlreadyRegistered look
+    // true even though this is genuinely a first pairing.
+    // This flag lives on `bot`, which is the same object
+    // across that internal restart, so it survives it.
+    // ==================================================
+
+    if (!bot.isOwner) {
+
+      bot.pendingWelcome =
+        true;
+    }
+
     return code;
 
   } catch (error) {
@@ -1583,9 +1606,16 @@ function createBotSession({
     // ==================================================
     // WELCOME MESSAGE — fires once, right after this
     // session's very first successful pairing (never
-    // again on later reconnects). See startBotSession's
-    // wasAlreadyRegistered capture and the "open" handler.
+    // again on later reconnects, and never for the
+    // owner). pendingWelcome is set to true the moment a
+    // pairing code is actually requested for this bot
+    // (see requestPairingCode), and welcomeSent latches
+    // to true once the welcome has actually been sent, so
+    // it can never fire twice even across retries.
     // ==================================================
+
+    pendingWelcome:
+      false,
 
     welcomeSent:
       false,
@@ -2108,20 +2138,6 @@ async function startBotSession(
     );
 
     // ==================================================
-    // WELCOME TRACKING
-    // ==================================================
-    //
-    // Captured once, right here, before the socket ever
-    // connects. On a genuinely new pairing this is false;
-    // on every later reconnect (including watchdog-forced
-    // ones) it's true — so the welcome message below only
-    // ever fires after the very first successful pairing.
-    // ==================================================
-
-    const wasAlreadyRegistered =
-      state.creds.registered;
-
-    // ==================================================
     // CREATE SOCKET
     // ==================================================
 
@@ -2301,13 +2317,27 @@ async function startBotSession(
             // chat-with-self, matching the self-chat
             // command flow (text your own number to
             // control your bot).
+            //
+            // Gated on bot.pendingWelcome rather than
+            // re-reading creds off disk — Baileys always
+            // does one internal stream restart right after
+            // a pairing code is entered, and by the next
+            // startBotSession call creds.registered already
+            // reads true, so a disk-based check can't tell
+            // "genuinely first pairing" from "mid-restart".
+            // pendingWelcome is set on this same bot object
+            // the moment a pairing code is requested, so it
+            // survives that restart correctly.
             // ------------------------------------------
 
             if (
               !bot.isOwner &&
-              !wasAlreadyRegistered &&
+              bot.pendingWelcome &&
               !bot.welcomeSent
             ) {
+
+              bot.pendingWelcome =
+                false;
 
               bot.welcomeSent =
                 true;
