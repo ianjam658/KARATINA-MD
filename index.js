@@ -3795,15 +3795,18 @@ async function startBotSession(
                * Baileys marks messages sent by your own account
                * as fromMe.
                *
-               * We allow ONLY the bot's own JID to pass through
-               * for commands such as:
+               * We allow the bot's own JID (fromMe messages, sent
+               * to anyone) to pass through for commands such as:
                *
                * .menu
                * .set autoreact true
                * .set autoreact false
                *
-               * We do NOT allow normal self-chat messages to
-               * trigger automatic reactions.
+               * isSelfChat is still tracked separately below for
+               * places (like where to route the "sender") that
+               * need to distinguish self-chat from "you texting
+               * someone else", but it no longer gates whether the
+               * message is processed at all.
                */
 
               const isSelfChat =
@@ -3818,17 +3821,6 @@ async function startBotSession(
                 Boolean(
                   msg.key?.fromMe
                 );
-
-              // ==================================================
-              // IGNORE BOT'S OWN MESSAGES EXCEPT SELF CHAT
-              // ==================================================
-
-              if (
-                isFromMe &&
-                !isSelfChat
-              ) {
-                continue;
-              }
 
               // ==================================================
               // MESSAGE TEXT
@@ -3861,7 +3853,7 @@ async function startBotSession(
               // ==================================================
 
               const senderJid =
-                isSelfChat
+                isFromMe
                   ? bot.jid
                   : getMessageSenderJid(
                       msg
@@ -3872,7 +3864,7 @@ async function startBotSession(
               // ==================================================
 
               const senderTier =
-                isSelfChat
+                isFromMe
                   ? getBotTier(bot)
                   : getSenderTier(
                       senderJid ||
@@ -4333,17 +4325,16 @@ async function startBotSession(
               // AUTO REACTION
               // ==================================================
               //
-              // isSelfChat is checked here directly (rather than
-              // with an early "continue" above) so that texting
-              // yourself only skips the reaction — not every
-              // command below this point. That was a real bug:
-              // .ping/.upgrade/.quote/.sticker/.qr/.yt/group tools
-              // were all silently disabled in self-chat before
-              // this fix, since a bare "continue" above them
-              // short-circuited the whole rest of the loop.
+              // Skips only for messages the bot's own account sent
+              // (isFromMe) — including self-chat and messages you
+              // send to other people — since reacting to your own
+              // outgoing messages doesn't make sense. Every command
+              // below this point still runs regardless of isFromMe;
+              // this block only ever "continues" the reaction logic
+              // itself, never the rest of the loop.
 
               if (
-                !isSelfChat &&
+                !isFromMe &&
                 bot.autoReact &&
                 hasAccess(
                   senderTier,
