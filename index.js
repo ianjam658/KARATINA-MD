@@ -1866,193 +1866,6 @@ const logger =
   });
 
 // ======================================================
-// SESSION-CORRUPTION ("BAD MAC") DETECTOR
-// ======================================================
-//
-// Baileys/libsignal print decrypt failures ("Failed to decrypt
-// message with any known session...", "Bad MAC") directly via
-// console, bypassing our own (silenced) pino logger — so they
-// can't be caught through Baileys' normal logger option. Instead
-// this watches the process' console output for those specific
-// signatures and counts them.
-//
-// A failure here and there is normal/transient (a message that
-// arrived out of order, a missed key exchange). A BURST of them
-// usually means that session's local encryption keys are out of
-// sync with WhatsApp's, and messages/commands for that number will
-// keep silently failing (showing up as "[non-text message]" with
-// no reply) until the session is deleted and re-paired.
-//
-// Attribution is a best-effort guess: these console lines don't
-// carry the phone number themselves, so each failure is tagged to
-// whichever session most recently had a message batch come in
-// (lastActiveBotPhone, set from messages.upsert below). That's
-// usually correct, since a decrypt failure is a direct result of
-// processing that session's incoming message — but treat the
-// phone number named in the warning as a strong hint, not a
-// certainty, especially if multiple sessions are busy at once.
-// ======================================================
-
-let lastActiveBotPhone =
-  null;
-
-const BAD_MAC_SIGNATURES = [
-  "Failed to decrypt message with any known session",
-  "Bad MAC",
-  "SessionError"
-];
-
-const BAD_MAC_THRESHOLD =
-  4; // failures within the window before warning
-
-const BAD_MAC_WINDOW_MS =
-  2 * 60 * 1000; // 2 minutes
-
-const BAD_MAC_WARNING_COOLDOWN_MS =
-  15 * 60 * 1000; // don't repeat-warn for the same phone more than every 15 min
-
-const badMacFailureTimestamps =
-  new Map(); // phone -> array of recent failure timestamps
-
-const badMacLastWarnedAt =
-  new Map(); // phone -> timestamp this phone was last warned about
-
-function consoleArgsLookLikeBadMac(
-  args
-) {
-
-  const text =
-    args
-      .map(
-        arg =>
-          typeof arg === "string"
-            ? arg
-            : (arg && arg.message) ||
-              ""
-      )
-      .join(" ");
-
-  return BAD_MAC_SIGNATURES.some(
-    signature =>
-      text.includes(signature)
-  );
-}
-
-function recordBadMacFailure() {
-
-  const phone =
-    lastActiveBotPhone ||
-    "unknown";
-
-  const now =
-    Date.now();
-
-  const existing =
-    badMacFailureTimestamps.get(
-      phone
-    ) || [];
-
-  const recent =
-    [
-      ...existing,
-      now
-    ].filter(
-      timestamp =>
-        now - timestamp <=
-        BAD_MAC_WINDOW_MS
-    );
-
-  badMacFailureTimestamps.set(
-    phone,
-    recent
-  );
-
-  if (
-    recent.length >=
-    BAD_MAC_THRESHOLD
-  ) {
-
-    const lastWarned =
-      badMacLastWarnedAt.get(
-        phone
-      ) || 0;
-
-    if (
-      now - lastWarned >=
-      BAD_MAC_WARNING_COOLDOWN_MS
-    ) {
-
-      badMacLastWarnedAt.set(
-        phone,
-        now
-      );
-
-      originalConsoleWarn(
-        "\n⚠️ [session-health] Repeated decrypt/\"Bad MAC\" errors detected " +
-        `(best-guess session: ${phone}). Messages/commands for this ` +
-        "number may keep silently failing until the session is re-paired. " +
-        `Consider: POST /api/admin/delete-session { "phone": "${phone}" }, ` +
-        "then have them pair again via /pair.\n"
-      );
-    }
-  }
-}
-
-const originalConsoleError =
-  console.error.bind(
-    console
-  );
-
-const originalConsoleWarn =
-  console.warn.bind(
-    console
-  );
-
-console.error = (
-  ...args
-) => {
-
-  originalConsoleError(
-    ...args
-  );
-
-  try {
-
-    if (
-      consoleArgsLookLikeBadMac(
-        args
-      )
-    ) {
-
-      recordBadMacFailure();
-    }
-
-  } catch (_) {}
-};
-
-console.warn = (
-  ...args
-) => {
-
-  originalConsoleWarn(
-    ...args
-  );
-
-  try {
-
-    if (
-      consoleArgsLookLikeBadMac(
-        args
-      )
-    ) {
-
-      recordBadMacFailure();
-    }
-
-  } catch (_) {}
-};
-
-// ======================================================
 // REQUEST PAIRING CODE
 // ======================================================
 
@@ -3549,15 +3362,6 @@ async function startBotSession(
           bot.lastActivityAt =
             Date.now();
 
-          // ----------------------------------------------
-          // BAD-MAC ATTRIBUTION: remember which session was
-          // last active, so a decrypt failure printed right
-          // after this can be best-guess attributed to it.
-          // ----------------------------------------------
-
-          lastActiveBotPhone =
-            bot.phone;
-
           for (
             const msg of messages
           ) {
@@ -4034,30 +3838,20 @@ async function startBotSession(
               }
 
               // ==================================================
-              // SELF CHAT DETECTION
+              // OWNER-ONLY GATE
               // ==================================================
-
-              /*
-               * This is the important part for:
-               *
-               * You → Your own WhatsApp number
-               *
-               * Baileys marks messages sent by your own account
-               * as fromMe.
-               *
-               * We allow the bot's own JID (fromMe messages, sent
-               * to anyone) to pass through for commands such as:
-               *
-               * .menu
-               * .set autoreact true
-               * .set autoreact false
-               *
-               * isSelfChat is still tracked separately below for
-               * places (like where to route the "sender") that
-               * need to distinguish self-chat from "you texting
-               * someone else", but it no longer gates whether the
-               * message is processed at all.
-               */
+              //
+              // This bot only ever responds to commands sent by
+              // the WhatsApp account connected to THIS session —
+              // whether that's a message to yourself (self-chat)
+              // or a command you send while texting someone else.
+              // Anyone else messaging this number (a customer's
+              // own contacts, strangers, etc.) is completely
+              // ignored for command purposes: no reply, no
+              // reaction, nothing. This applies the same way on
+              // every session, owner or customer — each connected
+              // number is a private tool for whoever owns it.
+              // ==================================================
 
               const isSelfChat =
                 jidToPhone(
@@ -4071,6 +3865,10 @@ async function startBotSession(
                 Boolean(
                   msg.key?.fromMe
                 );
+
+              if (!isFromMe) {
+                continue;
+              }
 
               // ==================================================
               // MESSAGE TEXT
@@ -4131,35 +3929,6 @@ async function startBotSession(
                   senderJid ||
                   remoteJid
                 );
-
-              // ==================================================
-              // CONTROL-REPLY TARGET
-              // ==================================================
-              //
-              // When the owner sends an owner/management command
-              // (.menu, .upgrade, .settings, .set) FROM their own
-              // number INTO someone else's chat (isFromMe true,
-              // isSelfChat false), the reply must NOT be posted
-              // into that other person's chat — it would expose
-              // owner status, settings, and PRO info to them,
-              // making it look like they were granted owner/PRO
-              // access even though only the actual sender (the
-              // owner) benefits from it. Route those specific
-              // replies back to the bot's own self-chat instead.
-              //
-              // Every other command (ping, quote, sticker, qr, yt,
-              // group tools) still replies into remoteJid as
-              // before — those are fine to show in whichever chat
-              // they were run from.
-              // ==================================================
-
-              const controlReplyTarget =
-                (
-                  isFromMe &&
-                  !isSelfChat
-                )
-                  ? bot.jid
-                  : remoteJid;
 
               console.log(
                 `📩 [${bot.phone}] [${senderTier.toUpperCase()}] ${
@@ -4283,7 +4052,7 @@ async function startBotSession(
 
                     await safeSend(
                       bot,
-                      controlReplyTarget,
+                      remoteJid,
                       {
                         text:
                           "🔒 *OWNER ONLY*\n\n" +
@@ -4326,7 +4095,7 @@ async function startBotSession(
 
                     await safeSend(
                       bot,
-                      controlReplyTarget,
+                      remoteJid,
                       {
                         text:
                           buildSettingsHelp(
@@ -4379,7 +4148,7 @@ async function startBotSession(
 
                       await safeSend(
                         bot,
-                        controlReplyTarget,
+                        remoteJid,
                         {
                           text:
                             buildSettingsHelp(
@@ -4420,7 +4189,7 @@ async function startBotSession(
 
                       await safeSend(
                         bot,
-                        controlReplyTarget,
+                        remoteJid,
                         {
                           text:
                             "🔒 *PRO SETTING*\n\n" +
@@ -4451,7 +4220,7 @@ async function startBotSession(
 
                     await safeSend(
                       bot,
-                      controlReplyTarget,
+                      remoteJid,
                       {
                         text:
                           wantsOn
@@ -4488,7 +4257,7 @@ async function startBotSession(
 
                   await safeSend(
                     bot,
-                    controlReplyTarget,
+                    remoteJid,
                     {
                       text:
                         "⚙️ *Unknown setting*\n\n" +
@@ -4540,7 +4309,7 @@ async function startBotSession(
 
                   await safeSend(
                     bot,
-                    controlReplyTarget,
+                    remoteJid,
                     {
                       text:
                         menu
@@ -4578,7 +4347,7 @@ async function startBotSession(
 
                   await safeSend(
                     bot,
-                    controlReplyTarget,
+                    remoteJid,
                     {
                       text:
                         buildSettingsHelp(
@@ -4739,7 +4508,7 @@ async function startBotSession(
 
                     await safeSend(
                       bot,
-                      controlReplyTarget,
+                      remoteJid,
                       {
                         text:
                           "👑 You are the bot owner.\n\n" +
