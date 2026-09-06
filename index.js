@@ -2237,7 +2237,17 @@ function createBotSession({
     // ==================================================
 
     messageCache:
-      new Map()
+      new Map(),
+
+    // ==================================================
+    // DEDUPE SET — tracks message ids already processed this
+    // session, so a duplicate delivery of the same message
+    // (a known Baileys/multi-device quirk) never triggers a
+    // command twice. Capped the same way as messageCache.
+    // ==================================================
+
+    processedMessageIds:
+      new Set()
   };
 
   sessions.set(
@@ -3370,6 +3380,50 @@ async function startBotSession(
               }
 
               // ==================================================
+              // DEDUPE — Baileys/WhatsApp multi-device sometimes
+              // delivers the exact same message twice in a single
+              // upsert batch (or across back-to-back batches), which
+              // was causing commands like .upgrade to reply twice.
+              // Skip anything we've already processed by message id.
+              // ==================================================
+
+              const dedupeId =
+                msg.key?.id;
+
+              if (dedupeId) {
+
+                if (
+                  bot.processedMessageIds.has(
+                    dedupeId
+                  )
+                ) {
+                  continue;
+                }
+
+                bot.processedMessageIds.add(
+                  dedupeId
+                );
+
+                if (
+                  bot.processedMessageIds.size >
+                  MESSAGE_CACHE_LIMIT
+                ) {
+
+                  const oldestId =
+                    bot.processedMessageIds
+                      .values()
+                      .next()
+                      .value;
+
+                  if (oldestId) {
+                    bot.processedMessageIds.delete(
+                      oldestId
+                    );
+                  }
+                }
+              }
+
+              // ==================================================
               // STATUS
               // ==================================================
 
@@ -4465,11 +4519,23 @@ async function startBotSession(
                 // ------------------------------------------------
                 // OWNER
                 // ------------------------------------------------
+                //
+                // Only the actual global creator (config.owner) —
+                // or the owner's own primary/creator bot session —
+                // gets automatic PRO here. senderIsBotOwner alone
+                // just means "this is the number connected to this
+                // particular customer session" — every customer is
+                // "the owner" of their own session, but that must
+                // NOT mean free PRO. Their real subscription tier
+                // (senderTier) still governs below.
 
                 if (
-                  senderIsBotOwner ||
                   isOwner(
                     senderJid
+                  ) ||
+                  (
+                    bot.isOwner &&
+                    senderIsBotOwner
                   )
                 ) {
 
