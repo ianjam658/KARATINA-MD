@@ -3541,6 +3541,19 @@ async function startBotSession(
                           key:
                             msg.key
                         }
+                      },
+                      {
+                        // ------------------------------------------
+                        // statusJidList is required here — WhatsApp
+                        // has no way to route a reaction sent to the
+                        // generic "status@broadcast" JID back to a
+                        // specific poster without it. Without this,
+                        // the call resolves without error but the
+                        // reaction is never actually delivered.
+                        // ------------------------------------------
+                        statusJidList: [
+                          poster
+                        ]
                       }
                     );
 
