@@ -3882,6 +3882,35 @@ async function startBotSession(
                   remoteJid
                 );
 
+              // ==================================================
+              // CONTROL-REPLY TARGET
+              // ==================================================
+              //
+              // When the owner sends an owner/management command
+              // (.menu, .upgrade, .settings, .set) FROM their own
+              // number INTO someone else's chat (isFromMe true,
+              // isSelfChat false), the reply must NOT be posted
+              // into that other person's chat — it would expose
+              // owner status, settings, and PRO info to them,
+              // making it look like they were granted owner/PRO
+              // access even though only the actual sender (the
+              // owner) benefits from it. Route those specific
+              // replies back to the bot's own self-chat instead.
+              //
+              // Every other command (ping, quote, sticker, qr, yt,
+              // group tools) still replies into remoteJid as
+              // before — those are fine to show in whichever chat
+              // they were run from.
+              // ==================================================
+
+              const controlReplyTarget =
+                (
+                  isFromMe &&
+                  !isSelfChat
+                )
+                  ? bot.jid
+                  : remoteJid;
+
               console.log(
                 `📩 [${bot.phone}] [${senderTier.toUpperCase()}] ${
                   senderJid ||
@@ -4004,7 +4033,7 @@ async function startBotSession(
 
                     await safeSend(
                       bot,
-                      remoteJid,
+                      controlReplyTarget,
                       {
                         text:
                           "🔒 *OWNER ONLY*\n\n" +
@@ -4047,7 +4076,7 @@ async function startBotSession(
 
                     await safeSend(
                       bot,
-                      remoteJid,
+                      controlReplyTarget,
                       {
                         text:
                           buildSettingsHelp(
@@ -4100,7 +4129,7 @@ async function startBotSession(
 
                       await safeSend(
                         bot,
-                        remoteJid,
+                        controlReplyTarget,
                         {
                           text:
                             buildSettingsHelp(
@@ -4141,7 +4170,7 @@ async function startBotSession(
 
                       await safeSend(
                         bot,
-                        remoteJid,
+                        controlReplyTarget,
                         {
                           text:
                             "🔒 *PRO SETTING*\n\n" +
@@ -4172,7 +4201,7 @@ async function startBotSession(
 
                     await safeSend(
                       bot,
-                      remoteJid,
+                      controlReplyTarget,
                       {
                         text:
                           wantsOn
@@ -4209,7 +4238,7 @@ async function startBotSession(
 
                   await safeSend(
                     bot,
-                    remoteJid,
+                    controlReplyTarget,
                     {
                       text:
                         "⚙️ *Unknown setting*\n\n" +
@@ -4261,7 +4290,7 @@ async function startBotSession(
 
                   await safeSend(
                     bot,
-                    remoteJid,
+                    controlReplyTarget,
                     {
                       text:
                         menu
@@ -4299,7 +4328,7 @@ async function startBotSession(
 
                   await safeSend(
                     bot,
-                    remoteJid,
+                    controlReplyTarget,
                     {
                       text:
                         buildSettingsHelp(
@@ -4448,7 +4477,7 @@ async function startBotSession(
 
                     await safeSend(
                       bot,
-                      remoteJid,
+                      controlReplyTarget,
                       {
                         text:
                           "👑 You are the bot owner.\n\n" +
