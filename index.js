@@ -1866,6 +1866,193 @@ const logger =
   });
 
 // ======================================================
+// SESSION-CORRUPTION ("BAD MAC") DETECTOR
+// ======================================================
+//
+// Baileys/libsignal print decrypt failures ("Failed to decrypt
+// message with any known session...", "Bad MAC") directly via
+// console, bypassing our own (silenced) pino logger — so they
+// can't be caught through Baileys' normal logger option. Instead
+// this watches the process' console output for those specific
+// signatures and counts them.
+//
+// A failure here and there is normal/transient (a message that
+// arrived out of order, a missed key exchange). A BURST of them
+// usually means that session's local encryption keys are out of
+// sync with WhatsApp's, and messages/commands for that number will
+// keep silently failing (showing up as "[non-text message]" with
+// no reply) until the session is deleted and re-paired.
+//
+// Attribution is a best-effort guess: these console lines don't
+// carry the phone number themselves, so each failure is tagged to
+// whichever session most recently had a message batch come in
+// (lastActiveBotPhone, set from messages.upsert below). That's
+// usually correct, since a decrypt failure is a direct result of
+// processing that session's incoming message — but treat the
+// phone number named in the warning as a strong hint, not a
+// certainty, especially if multiple sessions are busy at once.
+// ======================================================
+
+let lastActiveBotPhone =
+  null;
+
+const BAD_MAC_SIGNATURES = [
+  "Failed to decrypt message with any known session",
+  "Bad MAC",
+  "SessionError"
+];
+
+const BAD_MAC_THRESHOLD =
+  4; // failures within the window before warning
+
+const BAD_MAC_WINDOW_MS =
+  2 * 60 * 1000; // 2 minutes
+
+const BAD_MAC_WARNING_COOLDOWN_MS =
+  15 * 60 * 1000; // don't repeat-warn for the same phone more than every 15 min
+
+const badMacFailureTimestamps =
+  new Map(); // phone -> array of recent failure timestamps
+
+const badMacLastWarnedAt =
+  new Map(); // phone -> timestamp this phone was last warned about
+
+function consoleArgsLookLikeBadMac(
+  args
+) {
+
+  const text =
+    args
+      .map(
+        arg =>
+          typeof arg === "string"
+            ? arg
+            : (arg && arg.message) ||
+              ""
+      )
+      .join(" ");
+
+  return BAD_MAC_SIGNATURES.some(
+    signature =>
+      text.includes(signature)
+  );
+}
+
+function recordBadMacFailure() {
+
+  const phone =
+    lastActiveBotPhone ||
+    "unknown";
+
+  const now =
+    Date.now();
+
+  const existing =
+    badMacFailureTimestamps.get(
+      phone
+    ) || [];
+
+  const recent =
+    [
+      ...existing,
+      now
+    ].filter(
+      timestamp =>
+        now - timestamp <=
+        BAD_MAC_WINDOW_MS
+    );
+
+  badMacFailureTimestamps.set(
+    phone,
+    recent
+  );
+
+  if (
+    recent.length >=
+    BAD_MAC_THRESHOLD
+  ) {
+
+    const lastWarned =
+      badMacLastWarnedAt.get(
+        phone
+      ) || 0;
+
+    if (
+      now - lastWarned >=
+      BAD_MAC_WARNING_COOLDOWN_MS
+    ) {
+
+      badMacLastWarnedAt.set(
+        phone,
+        now
+      );
+
+      originalConsoleWarn(
+        "\n⚠️ [session-health] Repeated decrypt/\"Bad MAC\" errors detected " +
+        `(best-guess session: ${phone}). Messages/commands for this ` +
+        "number may keep silently failing until the session is re-paired. " +
+        `Consider: POST /api/admin/delete-session { "phone": "${phone}" }, ` +
+        "then have them pair again via /pair.\n"
+      );
+    }
+  }
+}
+
+const originalConsoleError =
+  console.error.bind(
+    console
+  );
+
+const originalConsoleWarn =
+  console.warn.bind(
+    console
+  );
+
+console.error = (
+  ...args
+) => {
+
+  originalConsoleError(
+    ...args
+  );
+
+  try {
+
+    if (
+      consoleArgsLookLikeBadMac(
+        args
+      )
+    ) {
+
+      recordBadMacFailure();
+    }
+
+  } catch (_) {}
+};
+
+console.warn = (
+  ...args
+) => {
+
+  originalConsoleWarn(
+    ...args
+  );
+
+  try {
+
+    if (
+      consoleArgsLookLikeBadMac(
+        args
+      )
+    ) {
+
+      recordBadMacFailure();
+    }
+
+  } catch (_) {}
+};
+
+// ======================================================
 // REQUEST PAIRING CODE
 // ======================================================
 
@@ -3361,6 +3548,15 @@ async function startBotSession(
 
           bot.lastActivityAt =
             Date.now();
+
+          // ----------------------------------------------
+          // BAD-MAC ATTRIBUTION: remember which session was
+          // last active, so a decrypt failure printed right
+          // after this can be best-guess attributed to it.
+          // ----------------------------------------------
+
+          lastActiveBotPhone =
+            bot.phone;
 
           for (
             const msg of messages
