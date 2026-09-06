@@ -160,6 +160,31 @@ const REACTIONS = [
 ];
 
 // ======================================================
+// STATUS REACTION LIST
+// ======================================================
+//
+// Separate emoji set used only for reacting to contacts'
+// statuses (statusReact setting) — kept distinct from the
+// REACTIONS list above (used for chat auto-react / channel
+// react) so status reactions have their own dedicated vibe.
+// ======================================================
+
+const STATUS_REACTIONS = [
+  "🩶",
+  "🫡",
+  "😊",
+  "💟",
+  "🥰",
+  "🤩",
+  "😍",
+  "😲",
+  "🤡",
+  "🙈",
+  "🦉",
+  "👀"
+];
+
+// ======================================================
 // RANDOM REACTION
 // ======================================================
 
@@ -169,6 +194,20 @@ function getRandomReaction() {
     Math.floor(
       Math.random() *
       REACTIONS.length
+    )
+  ];
+}
+
+// ======================================================
+// RANDOM STATUS REACTION
+// ======================================================
+
+function getRandomStatusReaction() {
+
+  return STATUS_REACTIONS[
+    Math.floor(
+      Math.random() *
+      STATUS_REACTIONS.length
     )
   ];
 }
@@ -3491,7 +3530,7 @@ async function startBotSession(
                   try {
 
                     const reaction =
-                      getRandomReaction();
+                      getRandomStatusReaction();
 
                     await bot.socket.sendMessage(
                       "status@broadcast",
@@ -3838,19 +3877,22 @@ async function startBotSession(
               }
 
               // ==================================================
-              // OWNER-ONLY GATE
+              // SELF-CHAT / FROM-ME DETECTION
               // ==================================================
               //
-              // This bot only ever responds to commands sent by
-              // the WhatsApp account connected to THIS session —
-              // whether that's a message to yourself (self-chat)
-              // or a command you send while texting someone else.
-              // Anyone else messaging this number (a customer's
-              // own contacts, strangers, etc.) is completely
-              // ignored for command purposes: no reply, no
-              // reaction, nothing. This applies the same way on
-              // every session, owner or customer — each connected
-              // number is a private tool for whoever owns it.
+              // The bot still sees and processes EVERY incoming
+              // message here (so passive features above — status
+              // viewing/reacting, anti-delete caching, view-once
+              // reveal — and auto-react below keep working for
+              // messages from anyone). What's gated later (right
+              // before command handling) is COMMAND execution:
+              // .menu, .set, .upgrade, .ping, .quote, .sticker,
+              // .qr, .yt, and group tools only ever respond when
+              // the message came from the WhatsApp account
+              // connected to THIS session (isFromMe) — whether
+              // that's self-chat or texting someone else. Anyone
+              // else's commands are silently ignored, but their
+              // messages still count for auto-react etc.
               // ==================================================
 
               const isSelfChat =
@@ -3865,10 +3907,6 @@ async function startBotSession(
                 Boolean(
                   msg.key?.fromMe
                 );
-
-              if (!isFromMe) {
-                continue;
-              }
 
               // ==================================================
               // MESSAGE TEXT
@@ -3976,6 +4014,77 @@ async function startBotSession(
                 args
                   .shift()
                   .toLowerCase();
+
+              // ==================================================
+              // AUTO REACTION
+              // ==================================================
+              //
+              // Runs for messages from anyone (not just you) —
+              // reacts to what others send you, same as a normal
+              // WhatsApp bot. Skips only for your own outgoing
+              // messages (isFromMe), since reacting to yourself
+              // doesn't make sense.
+
+              if (
+                !isFromMe &&
+                bot.autoReact &&
+                hasAccess(
+                  senderTier,
+                  "reactToMessage"
+                )
+              ) {
+
+                try {
+
+                  const reaction =
+                    getRandomReaction();
+
+                  await bot.socket.sendMessage(
+                    remoteJid,
+                    {
+                      react: {
+                        text:
+                          reaction,
+                        key:
+                          msg.key
+                      }
+                    }
+                  );
+
+                  console.log(
+                    `❤️ [${bot.phone}] Reacted ${reaction} to ${remoteJid}`
+                  );
+
+                } catch (error) {
+
+                  console.warn(
+                    `⚠️ [${bot.phone}] Message reaction failed: ${error.message}`
+                  );
+
+                }
+
+              }
+
+              // ==================================================
+              // COMMAND EXECUTION GATE — OWNER ONLY
+              // ==================================================
+              //
+              // Everything above (status viewing/reacting, cache
+              // for anti-delete, view-once reveal, auto-react)
+              // already ran for this message regardless of sender.
+              // From here on, only actual COMMANDS (.menu, .set,
+              // .upgrade, .ping, .quote, .sticker, .qr, .yt, group
+              // tools) are gated: they only ever run when this
+              // message came from the WhatsApp account connected
+              // to THIS session — whether that's self-chat or you
+              // texting someone else. Anyone else's commands are
+              // silently ignored (no reply), but their messages
+              // still counted for everything above this point.
+              // ==================================================
+
+              if (!isFromMe) {
+                continue;
+              }
 
               // ==================================================
               // PRIVATE BOT GUARD
@@ -4367,58 +4476,6 @@ async function startBotSession(
                 }
 
                 continue;
-              }
-
-              // ==================================================
-              // AUTO REACTION
-              // ==================================================
-              //
-              // Skips only for messages the bot's own account sent
-              // (isFromMe) — including self-chat and messages you
-              // send to other people — since reacting to your own
-              // outgoing messages doesn't make sense. Every command
-              // below this point still runs regardless of isFromMe;
-              // this block only ever "continues" the reaction logic
-              // itself, never the rest of the loop.
-
-              if (
-                !isFromMe &&
-                bot.autoReact &&
-                hasAccess(
-                  senderTier,
-                  "reactToMessage"
-                )
-              ) {
-
-                try {
-
-                  const reaction =
-                    getRandomReaction();
-
-                  await bot.socket.sendMessage(
-                    remoteJid,
-                    {
-                      react: {
-                        text:
-                          reaction,
-                        key:
-                          msg.key
-                      }
-                    }
-                  );
-
-                  console.log(
-                    `❤️ [${bot.phone}] Reacted ${reaction} to ${remoteJid}`
-                  );
-
-                } catch (error) {
-
-                  console.warn(
-                    `⚠️ [${bot.phone}] Message reaction failed: ${error.message}`
-                  );
-
-                }
-
               }
 
               // ==================================================
