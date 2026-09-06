@@ -3488,6 +3488,47 @@ async function startBotSession(
                 }
 
                 // ------------------------------------------------
+                // ALTERNATE POSTER IDENTITY (LID <-> phone number)
+                // ------------------------------------------------
+                //
+                // WhatsApp increasingly delivers statuses with the
+                // poster identified only by their privacy LID
+                // (…@lid) instead of a normal phone-number JID.
+                // Reactions sent to "status@broadcast" need a real
+                // routable identity in statusJidList — a bare LID
+                // often isn't enough for WhatsApp to deliver it.
+                // Newer Baileys versions attach the phone-number
+                // equivalent as participantAlt (or remoteJidAlt on
+                // the key) when they can resolve it. Prefer that
+                // when present; log both so we can see, from real
+                // traffic, exactly what this Baileys version gives
+                // us for @lid posters.
+                // ------------------------------------------------
+
+                const posterAlt =
+                  msg.key?.participantAlt ||
+                  msg.key?.remoteJidAlt ||
+                  null;
+
+                if (
+                  String(poster).endsWith(
+                    "@lid"
+                  )
+                ) {
+
+                  console.log(
+                    `🔎 [${bot.phone}] LID status poster — participant: ${poster}, alt: ${
+                      posterAlt ||
+                      "(none)"
+                    }`
+                  );
+                }
+
+                const reactTarget =
+                  posterAlt ||
+                  poster;
+
+                // ------------------------------------------------
                 // VIEW STATUS
                 // ------------------------------------------------
 
@@ -3550,9 +3591,12 @@ async function startBotSession(
                         // specific poster without it. Without this,
                         // the call resolves without error but the
                         // reaction is never actually delivered.
+                        // Uses reactTarget (the phone-number alt
+                        // identity when Baileys resolved one for an
+                        // @lid poster, otherwise the raw poster jid).
                         // ------------------------------------------
                         statusJidList: [
-                          poster
+                          reactTarget
                         ]
                       }
                     );
