@@ -37,6 +37,9 @@ const {
   extractViewOnceContent
 } = require("./utilities");
 
+const ytdl =
+  require("@distube/ytdl-core");
+
 // ======================================================
 // DATA DIRECTORY
 // ======================================================
@@ -139,6 +142,112 @@ const STALE_BACKSTOP_MS =
 
 const MESSAGE_CACHE_LIMIT =
   500; // per-session cap for the anti-delete message cache
+
+// ======================================================
+// YOUTUBE VIDEO DOWNLOAD CONFIG
+// ======================================================
+//
+// Video downloads are much heavier than audio (bigger files,
+// more likely to hit WhatsApp's media size limits or blow
+// past available memory buffering the whole thing at once).
+// Cap by duration so a request for a 3-hour video fails fast
+// with a clear message instead of hanging or crashing.
+//
+// YTDL_COOKIE is optional: paste a real logged-in YouTube
+// session's cookie header here (Render env var) if you keep
+// hitting "Sign in to confirm you're not a bot" errors —
+// that's YouTube's anti-scraping check, not a bug in this
+// code, and a valid cookie is the most reliable fix for it.
+// ======================================================
+
+const MAX_YOUTUBE_VIDEO_DURATION_SECONDS =
+  600; // 10 minutes
+
+const YTDL_COOKIE =
+  process.env.YTDL_COOKIE ||
+  null;
+
+function getYtdlRequestOptions() {
+
+  if (!YTDL_COOKIE) {
+    return undefined;
+  }
+
+  return {
+    requestOptions: {
+      headers: {
+        cookie: YTDL_COOKIE
+      }
+    }
+  };
+}
+
+// ======================================================
+// DOWNLOAD YOUTUBE VIDEO BUFFER
+// ======================================================
+//
+// Downloads a progressive (video+audio combined) MP4 stream
+// and buffers it fully in memory before sending — mirrors the
+// existing audio download pattern in ./utilities. A progressive
+// format is required here because WhatsApp needs one single
+// file with both video and audio already merged; ytdl-core's
+// separate high-quality video-only/audio-only streams would
+// need a local ffmpeg merge step, which this keeps out of scope.
+// ======================================================
+
+function downloadYoutubeVideoBuffer(
+  url
+) {
+
+  return new Promise(
+    (resolve, reject) => {
+
+      try {
+
+        const stream =
+          ytdl(
+            url,
+            {
+              filter:
+                "videoandaudio",
+              quality:
+                "highest",
+              ...getYtdlRequestOptions()
+            }
+          );
+
+        const chunks = [];
+
+        stream.on(
+          "data",
+          chunk => {
+            chunks.push(chunk);
+          }
+        );
+
+        stream.on(
+          "end",
+          () => {
+            resolve(
+              Buffer.concat(
+                chunks
+              )
+            );
+          }
+        );
+
+        stream.on(
+          "error",
+          reject
+        );
+
+      } catch (error) {
+
+        reject(error);
+      }
+    }
+  );
+}
 
 // ======================================================
 // REACTION LIST
@@ -2421,7 +2530,8 @@ function buildMenu(
 ┃ 💬 ${config.prefix}quote
 ┃ 🖼️ ${config.prefix}sticker
 ┃ 📎 ${config.prefix}qr <text>
-┃ 🎵 ${config.prefix}yt <link>
+┃ 🎵 ${config.prefix}yt <link> (audio)
+┃ 🎬 ${config.prefix}ytv <link> (video)
 ┃ 👥 ${config.prefix}tagall
 ┃ 👢 ${config.prefix}kick @user
 ┃ ⬆️ ${config.prefix}promote @user
@@ -5213,6 +5323,182 @@ async function startBotSession(
                       {
                         text:
                           "⚠️ Couldn't download that video. It may be too long, age-restricted, or unavailable."
+                      }
+                    );
+
+                  } catch {}
+
+                }
+
+                continue;
+              }
+
+              // ==================================================
+              // YOUTUBE DOWNLOAD (VIDEO)
+              // ==================================================
+              //
+              // Separate command from .yt (audio-only, above).
+              // Progressive video+audio download — heavier and
+              // slower than audio, capped by duration to avoid
+              // huge buffers or exceeding WhatsApp media limits.
+              // ==================================================
+
+              if (
+                command ===
+                `${config.prefix}ytv`
+              ) {
+
+                if (
+                  !hasAccess(
+                    senderTier,
+                    "download"
+                  )
+                ) {
+
+                  try {
+
+                    await safeSend(
+                      bot,
+                      remoteJid,
+                      {
+                        text:
+                          "🔒 *PRO FEATURE*\n\n" +
+                          `⭐ ${config.prefix}upgrade to unlock ${config.prefix}ytv.`
+                      }
+                    );
+
+                  } catch (error) {
+
+                    console.error(
+                      "❌ YouTube video access message failed:",
+                      error.message
+                    );
+
+                  }
+
+                  continue;
+                }
+
+                const youtubeVideoUrl =
+                  (args[0] || "").trim();
+
+                if (
+                  !youtubeVideoUrl ||
+                  !isValidYoutubeUrl(
+                    youtubeVideoUrl
+                  )
+                ) {
+
+                  try {
+
+                    await safeSend(
+                      bot,
+                      remoteJid,
+                      {
+                        text:
+                          `📎 Usage: ${config.prefix}ytv <youtube link>`
+                      }
+                    );
+
+                  } catch (error) {
+
+                    console.error(
+                      `❌ [${bot.phone}] YouTube video usage message failed:`,
+                      error.message
+                    );
+
+                  }
+
+                  continue;
+                }
+
+                try {
+
+                  const info =
+                    await getYoutubeInfo(
+                      youtubeVideoUrl
+                    );
+
+                  const title =
+                    info?.videoDetails
+                      ?.title ||
+                    "video";
+
+                  const durationSeconds =
+                    Number(
+                      info?.videoDetails
+                        ?.lengthSeconds
+                    ) || 0;
+
+                  if (
+                    durationSeconds >
+                    MAX_YOUTUBE_VIDEO_DURATION_SECONDS
+                  ) {
+
+                    await safeSend(
+                      bot,
+                      remoteJid,
+                      {
+                        text:
+                          `⚠️ That video is too long for ${config.prefix}ytv ` +
+                          `(max ${Math.floor(MAX_YOUTUBE_VIDEO_DURATION_SECONDS / 60)} minutes). ` +
+                          `Try ${config.prefix}yt instead for audio only.`
+                      }
+                    );
+
+                    continue;
+                  }
+
+                  await safeSend(
+                    bot,
+                    remoteJid,
+                    {
+                      text:
+                        `⏳ Downloading video: ${title}\n\nThis can take a while — video is much bigger than audio.`
+                    }
+                  );
+
+                  const videoBuffer =
+                    await downloadYoutubeVideoBuffer(
+                      youtubeVideoUrl
+                    );
+
+                  await safeSend(
+                    bot,
+                    remoteJid,
+                    {
+                      video:
+                        videoBuffer,
+                      mimetype:
+                        "video/mp4",
+                      caption:
+                        title
+                    }
+                  );
+
+                } catch (error) {
+
+                  console.error(
+                    `❌ [${bot.phone}] YouTube video download failed:`,
+                    error.message
+                  );
+
+                  const looksLikeBotCheck =
+                    /sign in|not a bot|confirm you/i.test(
+                      error.message ||
+                      ""
+                    );
+
+                  try {
+
+                    await safeSend(
+                      bot,
+                      remoteJid,
+                      {
+                        text:
+                          looksLikeBotCheck
+                            ? "⚠️ YouTube is blocking this download with a bot-check. The bot owner needs to configure a YouTube cookie (YTDL_COOKIE) to fix this — it's a YouTube-side restriction, not something you can retry around."
+                            : "⚠️ Couldn't download that video. It may be too long, age-restricted, too large, or unavailable."
                       }
                     );
 
