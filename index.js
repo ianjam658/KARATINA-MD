@@ -897,6 +897,133 @@ function ensureDirectory(dir) {
 }
 
 // ======================================================
+// CLOSE STALE SOCKET
+// ======================================================
+//
+// Ends a bot's current socket cleanly (if any) so it can be
+// safely discarded. Swallows errors — this is always called
+// on a socket we're about to throw away anyway, so a failure
+// here shouldn't block the re-pair flow that triggered it.
+// ======================================================
+
+function closeBotSocket(bot) {
+
+  if (!bot || !bot.socket) {
+    return;
+  }
+
+  try {
+
+    bot.socket.end(
+      new Error(
+        "resetting session for re-pair"
+      )
+    );
+
+  } catch (error) {
+
+    console.warn(
+      `⚠️ [${bot.phone}] Error closing old socket during reset:`,
+      error.message
+    );
+  }
+
+  bot.socket = null;
+}
+
+// ======================================================
+// RESET CUSTOMER SESSION
+// ======================================================
+//
+// Wipes a customer's saved credentials and drops their bot
+// object entirely. Used before re-pairing someone who is not
+// currently connected — a disconnected/logged-out session's
+// old socket and already-registered creds can't just be
+// reused for a brand new pairing code, so this clears both
+// and lets createBotSession start completely fresh.
+// ======================================================
+
+async function resetCustomerSession(phone) {
+
+  const clean =
+    normalizePhone(phone);
+
+  const existing =
+    sessions.get(clean);
+
+  if (existing) {
+
+    closeBotSocket(existing);
+
+    sessions.delete(clean);
+  }
+
+  const dir =
+    getCustomerSessionDir(clean);
+
+  try {
+
+    fs.rmSync(
+      dir,
+      {
+        recursive: true,
+        force: true
+      }
+    );
+
+  } catch (error) {
+
+    console.warn(
+      `⚠️ Could not clear session dir for ${clean}:`,
+      error.message
+    );
+  }
+}
+
+// ======================================================
+// WAIT FOR SOCKET READY
+// ======================================================
+//
+// createBotSession fires startBotSession without awaiting it
+// (fire-and-forget), so bot.socket may not exist yet the
+// instant /api/pair asks for a pairing code — makeWASocket()
+// only runs after a couple of awaited setup steps inside
+// startBotSession (fetchLatestBaileysVersion, useMultiFileAuthState).
+// Poll briefly instead of failing immediately with "socket not ready".
+// ======================================================
+
+async function waitForSocketReady(
+  bot,
+  timeoutMs = 15000
+) {
+
+  const start =
+    Date.now();
+
+  while (
+    !bot.socket &&
+    Date.now() - start <
+      timeoutMs
+  ) {
+
+    await new Promise(
+      resolve =>
+        setTimeout(
+          resolve,
+          200
+        )
+    );
+  }
+
+  if (!bot.socket) {
+
+    throw new Error(
+      "WhatsApp session is taking too long to initialize. Please try again."
+    );
+  }
+}
+
+// ======================================================
 // PAIRING PAGE
 // ======================================================
 
@@ -1233,19 +1360,45 @@ app.post(
           });
       }
 
-      if (!bot) {
+      // --------------------------------------------------
+      // RESET STALE SESSION BEFORE RE-PAIRING
+      // --------------------------------------------------
+      //
+      // Not currently connected — either they disconnected /
+      // got logged out after a previous pairing, or a previous
+      // attempt never finished. Reusing that same bot object
+      // won't work: its socket may be dead and its creds may
+      // already be marked "registered" on disk, so a fresh
+      // requestPairingCode() call on it fails or does nothing.
+      // Wipe the old socket + saved creds and start clean so
+      // the new code genuinely works.
 
-        bot =
-          createBotSession({
-            phone,
-            sessionDir:
-              getCustomerSessionDir(
-                phone
-              ),
-            isOwner: false
-          });
+      if (bot) {
 
+        await resetCustomerSession(
+          phone
+        );
+
+        bot = null;
       }
+
+      bot =
+        createBotSession({
+          phone,
+          sessionDir:
+            getCustomerSessionDir(
+              phone
+            ),
+          isOwner: false
+        });
+
+      // createBotSession starts the socket asynchronously
+      // without awaiting it, so it may not exist the instant
+      // we get here — wait for it instead of failing immediately.
+
+      await waitForSocketReady(
+        bot
+      );
 
       const code =
         await requestPairingCode(
@@ -1286,12 +1439,225 @@ app.get(
   "/",
   (req, res) => {
 
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${config.botname}</title>
+<style>
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0;
+  background: radial-gradient(circle at 20% 0%, #16202c 0%, #0b0f14 55%);
+  color: #fff;
+  font-family: -apple-system, Segoe UI, Arial, sans-serif;
+  min-height: 100vh;
+}
+
+.wrap {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 60px 24px 80px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: #121821;
+  border: 1px solid #223047;
+  font-size: 13px;
+  color: #aeb8c4;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #25d366;
+  box-shadow: 0 0 8px #25d366;
+  animation: pulse 1.6s infinite;
+}
+
+@keyframes pulse {
+  0%,100% { opacity: 1; }
+  50% { opacity: .4; }
+}
+
+.hero {
+  text-align: center;
+  margin-top: 40px;
+}
+
+.hero h1 {
+  font-size: 44px;
+  margin: 18px 0 10px;
+  background: linear-gradient(90deg, #25d366, #4fd1c5, #25d366);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shine 4s linear infinite;
+}
+
+@keyframes shine {
+  to { background-position: 200% center; }
+}
+
+.hero p {
+  color: #aeb8c4;
+  font-size: 17px;
+  max-width: 480px;
+  margin: 0 auto;
+  line-height: 1.6;
+}
+
+.cta {
+  display: inline-block;
+  margin-top: 30px;
+  padding: 16px 34px;
+  background: #25d366;
+  color: #06110b;
+  font-weight: bold;
+  font-size: 16px;
+  text-decoration: none;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(37,211,102,.25);
+  transition: transform .15s ease;
+}
+
+.cta:hover { transform: translateY(-2px); }
+
+.grid {
+  margin-top: 64px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  background: #121821;
+  border: 1px solid #1c2634;
+  border-radius: 14px;
+  padding: 20px;
+}
+
+.card .icon { font-size: 26px; }
+
+.card h3 {
+  font-size: 15px;
+  margin: 10px 0 6px;
+}
+
+.card p {
+  font-size: 13px;
+  color: #8b97a5;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.stats {
+  margin-top: 40px;
+  text-align: center;
+  font-size: 13px;
+  color: #6b7684;
+}
+
+</style>
+</head>
+
+<body>
+<div class="wrap">
+
+  <div style="text-align:center">
+    <span class="badge"><span class="dot"></span> <span id="statusText">Checking status...</span></span>
+  </div>
+
+  <div class="hero">
+    <div style="font-size:52px">🤖</div>
+    <h1>${config.botname}</h1>
+    <p>
+      Your own personal WhatsApp automation bot — auto-reactions,
+      status tools, media recovery, downloads and more, all connected
+      straight to your number.
+    </p>
+    <a class="cta" href="/pair">Connect Your WhatsApp →</a>
+  </div>
+
+  <div class="grid">
+
+    <div class="card">
+      <div class="icon">❤️</div>
+      <h3>Auto React</h3>
+      <p>Reacts automatically to messages and channel posts.</p>
+    </div>
+
+    <div class="card">
+      <div class="icon">📡</div>
+      <h3>Status Tools</h3>
+      <p>Views, reacts to, and can forward contacts' statuses.</p>
+    </div>
+
+    <div class="card">
+      <div class="icon">🗑️</div>
+      <h3>Anti-Delete</h3>
+      <p>Recovers messages that get deleted for everyone.</p>
+    </div>
+
+    <div class="card">
+      <div class="icon">🔓</div>
+      <h3>View-Once Reveal</h3>
+      <p>Unlocks view-once media so it doesn't disappear.</p>
+    </div>
+
+    <div class="card">
+      <div class="icon">🎵</div>
+      <h3>YouTube Downloads</h3>
+      <p>Pull audio or video straight into your chat.</p>
+    </div>
+
+    <div class="card">
+      <div class="icon">👥</div>
+      <h3>Group Tools</h3>
+      <p>Tag-all, kick, promote and demote, right from chat.</p>
+    </div>
+
+  </div>
+
+  <div class="stats" id="stats">Loading live stats...</div>
+
+</div>
+
+<script>
+fetch("/health")
+  .then(r => r.json())
+  .then(d => {
+    document.getElementById("statusText").textContent =
+      d.whatsapp === "connected" ? "Online" : "Starting up";
+    document.getElementById("stats").textContent =
+      d.connectedSessions + " active session(s) · uptime " +
+      Math.floor(d.uptime / 60) + "m";
+  })
+  .catch(() => {
+    document.getElementById("statusText").textContent = "Online";
+    document.getElementById("stats").textContent = "";
+  });
+</script>
+
+</body>
+</html>
+`;
+
     res
       .status(200)
-      .send(
-        `${config.botname} WhatsApp Bot is running ✅<br><br>` +
-        `Customer pairing: <a href="/pair">/pair</a>`
-      );
+      .send(html);
   }
 );
 
