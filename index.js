@@ -2175,6 +2175,7 @@ app.post(
 
       if (
         wantsOn &&
+        settingDef.feature &&
         !hasAccess(
           getBotTier(bot),
           settingDef.feature
@@ -2511,7 +2512,7 @@ function getSettableDefinitions() {
 
     statusreact: {
       field: "statusReact",
-      feature: "statusReact",
+      feature: null,
       onText:
         "❤️ *Status Auto React ENABLED* ✅\n\nThe bot will now react to contacts' statuses.",
       offText:
@@ -2906,7 +2907,7 @@ function buildMenu(
 ┣━━━〔 SETTINGS 〕━━━
 ┃
 ┃ ❤️ Auto React (chats): ${reactStatus}
-┃ ❤️ Status Auto React: ${statusReactStatus} 🔒PRO
+┃ ❤️ Status Auto React: ${statusReactStatus}
 ┃ 📡 Status Forward: ${statusForwardStatus} 🔒PRO
 ┃ 🗑️ Anti-Delete: ${antiDeleteStatus} 🔒PRO
 ┃ 🔓 View-Once Reveal: ${viewOnceStatus} 🔒PRO
@@ -2950,7 +2951,7 @@ function buildSettingsHelp(
   const statusLines =
     [
       line("Auto React (chats)", "autoReact"),
-      line("Status Auto React 🔒PRO", "statusReact"),
+      line("Status Auto React", "statusReact"),
       line("Status Forward 🔒PRO", "statusForward"),
       line("Anti-Delete 🔒PRO", "antiDelete"),
       line("View-Once Reveal 🔒PRO", "viewOnce"),
@@ -4037,11 +4038,7 @@ async function startBotSession(
                 // already get.
 
                 if (
-                  bot.statusReact &&
-                  hasAccess(
-                    getBotTier(bot),
-                    "statusReact"
-                  )
+                  bot.statusReact
                 ) {
 
                   try {
@@ -4821,6 +4818,7 @@ async function startBotSession(
 
                   if (
                     wantsOn &&
+                    settingDef.feature &&
                     !hasAccess(
                       getBotTier(bot),
                       settingDef.feature
