@@ -3596,6 +3596,59 @@ async function startBotSession(
             }
 
             // ------------------------------------------
+            // UNREGISTERED CUSTOMER — PAIRING NEVER FINISHED
+            // ------------------------------------------
+            //
+            // A pairing code is tied to the specific socket that
+            // requested it. Blindly reconnecting here (as the
+            // generic RECONNECT branch below does) creates a
+            // brand new socket — which silently invalidates
+            // whatever code the customer was just given, even
+            // though the disconnect itself (428/408/etc, right
+            // after a code is issued) is a normal part of
+            // WhatsApp's pairing protocol. The customer then
+            // enters a code that no longer matches anything, and
+            // the next connection attempt gets flatly rejected
+            // with 401 (logged out) — which is exactly the
+            // 428 → reconnect → 401 sequence seen in production
+            // logs.
+            //
+            // Instead of looping through a dead pairing attempt,
+            // stop here and wipe this session completely. The
+            // customer can request a new code from /pair, and
+            // resetCustomerSession there guarantees a genuinely
+            // fresh socket + fresh code — the only combination
+            // that reliably works. Owner sessions are excluded:
+            // they have no /pair web flow to fall back on, so
+            // they keep the existing auto-retry behavior.
+
+            if (
+              !bot.isOwner &&
+              !state.creds.registered
+            ) {
+
+              console.log(
+                `⚠️ [${bot.phone}] Disconnected before pairing finished (not auto-reconnecting — that would invalidate the code just issued). Clearing this session; request a new code from /pair.`
+              );
+
+              try {
+
+                await resetCustomerSession(
+                  bot.phone
+                );
+
+              } catch (error) {
+
+                console.warn(
+                  `⚠️ [${bot.phone}] Cleanup after failed pairing had an issue:`,
+                  error.message
+                );
+              }
+
+              return;
+            }
+
+            // ------------------------------------------
             // RECONNECT
             // ------------------------------------------
 
