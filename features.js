@@ -8,6 +8,7 @@
  * - View incoming messages
  * - Auto reactions
  * - Status viewing
+ * - Status reactions
  * - Ping
  * - Menu
  * - Upgrade
@@ -37,6 +38,7 @@ const FEATURE_REQUIREMENTS = Object.freeze({
   menu: TIERS.FREE,
   upgrade: TIERS.FREE,
   welcomeMembers: TIERS.FREE,
+  statusReact: TIERS.FREE,
   // -------------------------
   // PRO FEATURES
   // -------------------------
@@ -45,7 +47,6 @@ const FEATURE_REQUIREMENTS = Object.freeze({
   qr: TIERS.PRO,
   download: TIERS.PRO,
   groupTools: TIERS.PRO,
-  statusReact: TIERS.PRO,
   statusForward: TIERS.PRO,
   antiDelete: TIERS.PRO,
   viewOnce: TIERS.PRO,
