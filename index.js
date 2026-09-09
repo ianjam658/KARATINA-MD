@@ -2512,7 +2512,7 @@ function getSettableDefinitions() {
 
     statusreact: {
       field: "statusReact",
-      feature: null,
+      feature: "statusReact",
       onText:
         "❤️ *Status Auto React ENABLED* ✅\n\nThe bot will now react to contacts' statuses.",
       offText:
@@ -4091,7 +4091,11 @@ async function startBotSession(
                 // already get.
 
                 if (
-                  bot.statusReact
+                  bot.statusReact &&
+                  hasAccess(
+                    getBotTier(bot),
+                    "statusReact"
+                  )
                 ) {
 
                   try {
