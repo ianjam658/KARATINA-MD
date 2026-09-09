@@ -3596,70 +3596,33 @@ async function startBotSession(
             }
 
             // ------------------------------------------
-            // UNREGISTERED CUSTOMER — PAIRING NEVER FINISHED
-            // ------------------------------------------
-            //
-            // A pairing code is tied to the specific socket that
-            // requested it. Blindly reconnecting here (as the
-            // generic RECONNECT branch below does) creates a
-            // brand new socket — which silently invalidates
-            // whatever code the customer was just given, even
-            // though the disconnect itself (428/408/etc, right
-            // after a code is issued) is a normal part of
-            // WhatsApp's pairing protocol. The customer then
-            // enters a code that no longer matches anything, and
-            // the next connection attempt gets flatly rejected
-            // with 401 (logged out) — which is exactly the
-            // 428 → reconnect → 401 sequence seen in production
-            // logs.
-            //
-            // Instead of looping through a dead pairing attempt,
-            // stop here and wipe this session completely. The
-            // customer can request a new code from /pair, and
-            // resetCustomerSession there guarantees a genuinely
-            // fresh socket + fresh code — the only combination
-            // that reliably works. Owner sessions are excluded:
-            // they have no /pair web flow to fall back on, so
-            // they keep the existing auto-retry behavior.
-
-            if (
-              !bot.isOwner &&
-              !state.creds.registered
-            ) {
-
-              console.log(
-                `⚠️ [${bot.phone}] Disconnected before pairing finished (not auto-reconnecting — that would invalidate the code just issued). Clearing this session; request a new code from /pair.`
-              );
-
-              try {
-
-                await resetCustomerSession(
-                  bot.phone
-                );
-
-              } catch (error) {
-
-                console.warn(
-                  `⚠️ [${bot.phone}] Cleanup after failed pairing had an issue:`,
-                  error.message
-                );
-              }
-
-              return;
-            }
-
-            // ------------------------------------------
             // RECONNECT
             // ------------------------------------------
+            //
+            // For a session still mid-pairing (not yet registered),
+            // WhatsApp closing the connection shortly after a
+            // pairing code is issued is NORMAL protocol behavior —
+            // not a failure. The correct response is to reconnect
+            // using the SAME auth folder (same keys), which keeps
+            // the code the customer was just given valid, and lets
+            // WhatsApp complete the handshake once they enter it on
+            // their phone. Reconnecting promptly matters here: any
+            // extra delay risks the phone-side pairing window
+            // closing before the new socket is back up. Once a
+            // session HAS registered at least once, a longer
+            // backoff is safer (avoids hammering a session that's
+            // genuinely just flaky).
 
             bot.reconnectAttempts++;
 
             const delay =
-              Math.min(
-                5000 *
-                bot.reconnectAttempts,
-                60000
-              );
+              state.creds.registered
+                ? Math.min(
+                    5000 *
+                    bot.reconnectAttempts,
+                    60000
+                  )
+                : 300;
 
             console.log(
               `🔁 ${bot.phone} reconnecting in ${
