@@ -263,20 +263,64 @@ function downloadYoutubeVideoBuffer(
 // last few messages per contact) is a natural future upgrade but
 // adds real complexity (per-chat history storage, trimming, etc.)
 // that's out of scope here.
+//
+// TWO SUPPORTED PROVIDERS — pick with AI_PROVIDER:
+//
+//   AI_PROVIDER=anthropic (default)
+//     Needs: AI_API_KEY (a Claude API key from platform.claude.com)
+//     Model:  AI_MODEL, defaults to "claude-haiku-4-5-20251001"
+//
+//   AI_PROVIDER=groq
+//     Needs: GROQ_API_KEY (from console.groq.com — has a genuine
+//     no-card-required free tier, just rate-limited)
+//     Model:  AI_MODEL, defaults to "llama-3.3-70b-versatile"
+//
+// Both are called the same way from the rest of the file — only
+// this section needs to know the two request/response shapes
+// differ (Anthropic's Messages API vs Groq's OpenAI-compatible
+// chat/completions API).
 // ======================================================
 
-const AI_API_KEY =
-  process.env.AI_API_KEY ||
-  null;
-
-const AI_MODEL =
-  process.env.AI_MODEL ||
-  "claude-haiku-4-5-20251001";
+const AI_PROVIDER =
+  (
+    process.env.AI_PROVIDER ||
+    "anthropic"
+  )
+    .trim()
+    .toLowerCase();
 
 const AI_MAX_TOKENS =
   Number(
     process.env.AI_MAX_TOKENS
   ) || 300;
+
+function getAiApiKey() {
+
+  if (AI_PROVIDER === "groq") {
+
+    return (
+      process.env.GROQ_API_KEY ||
+      process.env.AI_API_KEY ||
+      null
+    );
+  }
+
+  return (
+    process.env.AI_API_KEY ||
+    null
+  );
+}
+
+function getAiModel() {
+
+  if (process.env.AI_MODEL) {
+    return process.env.AI_MODEL;
+  }
+
+  return AI_PROVIDER === "groq"
+    ? "llama-3.3-70b-versatile"
+    : "claude-haiku-4-5-20251001";
+}
 
 function getAiSystemPrompt() {
 
@@ -289,28 +333,13 @@ function getAiSystemPrompt() {
 }
 
 // ======================================================
-// GET AI REPLY
+// GET AI REPLY — ANTHROPIC
 // ======================================================
 
-async function getAiReply(
-  text
+async function getAnthropicReply(
+  apiKey,
+  trimmedText
 ) {
-
-  if (!AI_API_KEY) {
-
-    throw new Error(
-      "AI_API_KEY is not configured on the server."
-    );
-  }
-
-  const trimmedText =
-    String(text || "")
-      .slice(0, 4000)
-      .trim();
-
-  if (!trimmedText) {
-    return null;
-  }
 
   const response =
     await fetch(
@@ -321,7 +350,7 @@ async function getAiReply(
         headers: {
 
           "x-api-key":
-            AI_API_KEY,
+            apiKey,
 
           "anthropic-version":
             "2023-06-01",
@@ -334,7 +363,7 @@ async function getAiReply(
         body: JSON.stringify({
 
           model:
-            AI_MODEL,
+            getAiModel(),
 
           max_tokens:
             AI_MAX_TOKENS,
@@ -364,14 +393,14 @@ async function getAiReply(
         );
 
     throw new Error(
-      `AI API returned ${response.status}: ${errorBody.slice(0, 200)}`
+      `Anthropic API returned ${response.status}: ${errorBody.slice(0, 200)}`
     );
   }
 
   const data =
     await response.json();
 
-  const reply =
+  return (
     (data?.content || [])
       .filter(
         block =>
@@ -383,9 +412,140 @@ async function getAiReply(
           block.text
       )
       .join("\n")
+      .trim() ||
+    null
+  );
+}
+
+// ======================================================
+// GET AI REPLY — GROQ
+// ======================================================
+//
+// Groq's chat/completions endpoint is OpenAI-compatible: a
+// system message and a user message in the same `messages`
+// array (no separate top-level `system` field like Anthropic),
+// Bearer auth, and the reply lands at
+// choices[0].message.content instead of a content-block array.
+// ======================================================
+
+async function getGroqReply(
+  apiKey,
+  trimmedText
+) {
+
+  const response =
+    await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+
+        headers: {
+
+          Authorization:
+            `Bearer ${apiKey}`,
+
+          "content-type":
+            "application/json"
+
+        },
+
+        body: JSON.stringify({
+
+          model:
+            getAiModel(),
+
+          max_tokens:
+            AI_MAX_TOKENS,
+
+          messages: [
+            {
+              role: "system",
+              content:
+                getAiSystemPrompt()
+            },
+            {
+              role: "user",
+              content:
+                trimmedText
+            }
+          ]
+
+        })
+      }
+    );
+
+  if (!response.ok) {
+
+    const errorBody =
+      await response
+        .text()
+        .catch(
+          () => ""
+        );
+
+    throw new Error(
+      `Groq API returned ${response.status}: ${errorBody.slice(0, 200)}`
+    );
+  }
+
+  const data =
+    await response.json();
+
+  const reply =
+    data
+      ?.choices
+      ?.[0]
+      ?.message
+      ?.content;
+
+  return (
+    typeof reply === "string"
+      ? reply.trim()
+      : null
+  ) || null;
+}
+
+// ======================================================
+// GET AI REPLY — DISPATCH
+// ======================================================
+
+async function getAiReply(
+  text
+) {
+
+  const apiKey =
+    getAiApiKey();
+
+  if (!apiKey) {
+
+    throw new Error(
+      AI_PROVIDER === "groq"
+        ? "GROQ_API_KEY is not configured on the server."
+        : "AI_API_KEY is not configured on the server."
+    );
+  }
+
+  const trimmedText =
+    String(text || "")
+      .slice(0, 4000)
       .trim();
 
-  return reply || null;
+  if (!trimmedText) {
+    return null;
+  }
+
+  if (AI_PROVIDER === "groq") {
+
+    return getGroqReply(
+      apiKey,
+      trimmedText
+    );
+  }
+
+  return getAnthropicReply(
+    apiKey,
+    trimmedText
+  );
 }
 
 // ======================================================
