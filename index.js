@@ -109,7 +109,7 @@ const sessions = new Map();
 const pairingCooldowns = new Map();
 
 const PAIRING_COOLDOWN_MS =
-  60 * 1000;
+  90 * 1000;
 
 // ======================================================
 // WATCHDOG CONFIG
@@ -1382,28 +1382,93 @@ app.post(
         bot = null;
       }
 
-      bot =
-        createBotSession({
-          phone,
-          sessionDir:
-            getCustomerSessionDir(
+      // --------------------------------------------------
+      // CREATE SESSION + REQUEST CODE, WITH ONE RETRY
+      // --------------------------------------------------
+      //
+      // A brand new socket occasionally closes (e.g. "Connection
+      // Closed") in the tiny window between it existing and the
+      // pairing-code request actually going out — a transient
+      // race, not something the customer caused. Rather than
+      // surfacing that raw error on the very first attempt, try
+      // once more with a fully fresh session before giving up.
+
+      const MAX_PAIR_ATTEMPTS = 2;
+
+      let code = null;
+
+      let lastPairError = null;
+
+      for (
+        let attempt = 1;
+        attempt <=
+        MAX_PAIR_ATTEMPTS;
+        attempt++
+      ) {
+
+        try {
+
+          bot =
+            createBotSession({
+              phone,
+              sessionDir:
+                getCustomerSessionDir(
+                  phone
+                ),
+              isOwner: false
+            });
+
+          // createBotSession starts the socket asynchronously
+          // without awaiting it, so it may not exist the instant
+          // we get here — wait for it instead of failing immediately.
+
+          await waitForSocketReady(
+            bot
+          );
+
+          code =
+            await requestPairingCode(
+              bot
+            );
+
+          break;
+
+        } catch (error) {
+
+          lastPairError =
+            error;
+
+          console.warn(
+            `⚠️ Pairing attempt ${attempt}/${MAX_PAIR_ATTEMPTS} failed for ${phone}: ${error.message}`
+          );
+
+          try {
+
+            await resetCustomerSession(
               phone
-            ),
-          isOwner: false
-        });
+            );
 
-      // createBotSession starts the socket asynchronously
-      // without awaiting it, so it may not exist the instant
-      // we get here — wait for it instead of failing immediately.
+          } catch (cleanupError) {
 
-      await waitForSocketReady(
-        bot
-      );
+            console.warn(
+              `⚠️ Cleanup between pairing attempts had an issue:`,
+              cleanupError.message
+            );
+          }
 
-      const code =
-        await requestPairingCode(
-          bot
+          bot = null;
+        }
+      }
+
+      if (!code) {
+
+        throw (
+          lastPairError ||
+          new Error(
+            "Unable to generate a pairing code after multiple attempts."
+          )
         );
+      }
 
       return res
         .status(200)
