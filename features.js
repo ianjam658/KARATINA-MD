@@ -51,7 +51,8 @@ const FEATURE_REQUIREMENTS = Object.freeze({
   antiDelete: TIERS.PRO,
   viewOnce: TIERS.PRO,
   callReject: TIERS.PRO,
-  channelReact: TIERS.PRO
+  channelReact: TIERS.PRO,
+  aiReply: TIERS.PRO
   // Add future PRO features here, for example:
   //
   // ai: TIERS.PRO,
