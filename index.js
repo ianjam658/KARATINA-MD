@@ -3728,7 +3728,7 @@ async function startBotSession(
         browser: [
           "Ubuntu",
           "Chrome",
-          "120.0.0"
+          "131.0.0"
         ],
 
         markOnlineOnConnect:
@@ -5190,12 +5190,21 @@ async function startBotSession(
               // starts with the bot's own command prefix so a
               // failed command attempt from a non-owner doesn't
               // get an AI reply instead of being silently ignored.
+              //
+              // Gated on the BOT ACCOUNT's own subscription
+              // (getBotTier(bot)), not the tier of whoever is
+              // texting in (senderTier). This is a feature the
+              // bot's owner pays for to auto-reply to THEIR
+              // incoming messages — the random people texting
+              // them were never themselves PRO subscribers in
+              // this system, so checking senderTier here would
+              // (almost) always fail and silently never fire.
 
               if (
                 !isFromMe &&
                 bot.aiReply &&
                 hasAccess(
-                  senderTier,
+                  getBotTier(bot),
                   "aiReply"
                 ) &&
                 !remoteJid.endsWith(
