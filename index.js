@@ -143,6 +143,9 @@ const STALE_BACKSTOP_MS =
 const MESSAGE_CACHE_LIMIT =
   500; // per-session cap for the anti-delete message cache
 
+const MAX_UNREGISTERED_RECONNECT_ATTEMPTS =
+  15; // give a mid-pairing session ~15 quick reconnect cycles (roughly covers a normal pairing window) before giving up and cleaning it up — without this cap, an abandoned/never-completed pairing reconnects every 300ms forever, which can get the number rate-limited by WhatsApp
+
 // ======================================================
 // YOUTUBE VIDEO DOWNLOAD CONFIG
 // ======================================================
@@ -1207,7 +1210,47 @@ function ensureDirectory(dir) {
 
 function closeBotSocket(bot) {
 
-  if (!bot || !bot.socket) {
+  if (!bot) {
+    return;
+  }
+
+  bot.discarded =
+    true;
+
+  if (!bot.socket) {
+    return;
+  }
+
+  // ------------------------------------------------------
+  // STILL MID-CONNECT — DON'T FORCE-CLOSE IT
+  // ------------------------------------------------------
+  //
+  // A socket that hasn't finished its initial handshake yet
+  // (bot.starting is still true, no "open" or "close" event has
+  // landed) can throw "WebSocket was closed before the
+  // connection was established" when asked to close — and in
+  // practice that throw has escaped the try/catch below (it
+  // happens on a later tick deep inside Baileys/ws, even though
+  // Node's async stack traces make it look like it came from
+  // right here), crashing out to the process-level
+  // uncaughtException handler.
+  //
+  // Since `discarded` is already set above, every guard already
+  // in place (startBotSession's top check, the post-socket-
+  // creation check, and the connection.update handler's own
+  // check) will ignore this socket from here on regardless — so
+  // for one that's still connecting, it's safer to just drop our
+  // reference and let that in-flight attempt resolve or fail on
+  // its own than to force-close it and risk this crash.
+
+  const stillConnecting =
+    bot.starting &&
+    !bot.isConnected;
+
+  if (stillConnecting) {
+
+    bot.socket = null;
+
     return;
   }
 
@@ -2598,7 +2641,7 @@ app.post(
 
 app.post(
   "/api/admin/delete-session",
-  (req, res) => {
+  async (req, res) => {
 
     try {
 
@@ -2661,32 +2704,36 @@ app.post(
           phone
         );
 
-      if (
-        !fs.existsSync(dir)
-      ) {
+      const existed =
+        sessions.has(
+          phone
+        ) ||
+        fs.existsSync(dir);
+
+      if (!existed) {
 
         return res
           .status(404)
           .json({
             error:
-              `No session folder found for ${phone}.`
+              `No session found for ${phone}.`
           });
       }
 
-      fs.rmSync(
-        dir,
-        {
-          recursive: true,
-          force: true
-        }
-      );
+      // resetCustomerSession properly closes any live socket
+      // (marking it discarded first, so its old event handler
+      // doesn't schedule a zombie reconnect), removes it from
+      // the sessions map, and wipes the directory — the same
+      // safe cleanup /api/pair uses before re-pairing, rather
+      // than deleting the folder out from under a still-live
+      // connection.
 
-      sessions.delete(
+      await resetCustomerSession(
         phone
       );
 
       console.log(
-        `🧹 [admin] Deleted session folder for ${phone}`
+        `🧹 [admin] Deleted session for ${phone}`
       );
 
       return res
@@ -3025,6 +3072,22 @@ function createBotSession({
       false,
 
     starting:
+      false,
+
+    // ==================================================
+    // DISCARDED — set true right before this bot object is
+    // force-closed and thrown away (session reset before
+    // re-pairing, or an abandoned-pairing cleanup). The old
+    // socket's own connection.update handler is still
+    // attached at that point and would otherwise see "closed,
+    // not logged out" and schedule a reconnect on this now-
+    // orphaned object — a zombie reconnect loop that's no
+    // longer tracked in `sessions` but keeps hammering
+    // WhatsApp in the background. This flag lets that handler
+    // recognize itself as discarded and stop immediately.
+    // ==================================================
+
+    discarded:
       false,
 
     pairingInProgress:
@@ -3546,6 +3609,15 @@ async function startBotSession(
     return;
   }
 
+  if (bot.discarded) {
+
+    console.log(
+      `🧹 Session ${bot.phone} was discarded — not starting.`
+    );
+
+    return;
+  }
+
   if (bot.starting) {
 
     console.log(
@@ -3683,6 +3755,35 @@ async function startBotSession(
       });
 
     // ==================================================
+    // DISCARDED WHILE MID-STARTUP
+    // ==================================================
+    //
+    // The top-of-function discarded check only catches a call
+    // that hadn't started yet. If THIS call was already past
+    // that check and sitting at an earlier await (fetching the
+    // Baileys version, reading auth state) when it got
+    // discarded, it wouldn't see that until now. Catch it here
+    // too, before any event listeners are attached — an
+    // unlistened socket can't schedule a zombie reconnect.
+
+    if (bot.discarded) {
+
+      // This socket was just created milliseconds ago and can't
+      // possibly have finished connecting yet — calling .end()
+      // on it risks the same "WebSocket was closed before the
+      // connection was established" crash fixed in
+      // closeBotSocket. Just drop the reference; discarded is
+      // already true, so nothing will act on this socket even if
+      // its in-flight connect attempt eventually resolves.
+
+      bot.socket = null;
+
+      bot.starting = false;
+
+      return;
+    }
+
+    // ==================================================
     // SAVE CREDENTIALS
     // ==================================================
 
@@ -3715,6 +3816,25 @@ async function startBotSession(
       async update => {
 
         try {
+
+          // ------------------------------------------
+          // DISCARDED — ignore everything
+          // ------------------------------------------
+          //
+          // This bot object was deliberately thrown away
+          // (session reset for re-pair, or an abandoned-
+          // pairing cleanup). Its socket is being force-
+          // closed on purpose right now; without this
+          // check, the resulting "close" event would look
+          // like an ordinary disconnect and this handler
+          // would schedule a reconnect on an object nothing
+          // else references anymore — a zombie loop that
+          // keeps reconnecting to WhatsApp in the background
+          // with no way to stop it from the outside.
+
+          if (bot.discarded) {
+            return;
+          }
 
           const {
             connection,
@@ -3999,6 +4119,62 @@ async function startBotSession(
             // genuinely just flaky).
 
             bot.reconnectAttempts++;
+
+            // ------------------------------------------
+            // GIVE UP ON AN ABANDONED PAIRING ATTEMPT
+            // ------------------------------------------
+            //
+            // Without this cap, a session that never completes
+            // pairing (customer never enters the code, or it just
+            // never resolves) reconnects every 300ms forever —
+            // hundreds of connection attempts per minute to
+            // WhatsApp's servers, indefinitely. That's exactly the
+            // kind of pattern that gets a number rate-limited or
+            // temporarily blocked by WhatsApp, which then makes
+            // EVERY subsequent pairing attempt fail too — including
+            // ones from a totally fresh /pair request. Capping this
+            // and cleaning up gives a real pairing window (~15
+            // quick cycles) without spinning forever on a dead one.
+
+            if (
+              !state.creds.registered &&
+              bot.reconnectAttempts >
+              MAX_UNREGISTERED_RECONNECT_ATTEMPTS
+            ) {
+
+              console.log(
+                `⚠️ [${bot.phone}] Gave up after ${bot.reconnectAttempts} reconnect attempts without completing pairing.`
+              );
+
+              if (bot.isOwner) {
+
+                console.log(
+                  `🧹 Owner session stopped retrying. Restart the service to try pairing again.`
+                );
+
+              } else {
+
+                console.log(
+                  `🧹 Clearing this session; request a new code from /pair to try again.`
+                );
+
+                try {
+
+                  await resetCustomerSession(
+                    bot.phone
+                  );
+
+                } catch (error) {
+
+                  console.warn(
+                    `⚠️ [${bot.phone}] Cleanup after abandoned pairing had an issue:`,
+                    error.message
+                  );
+                }
+              }
+
+              return;
+            }
 
             const delay =
               state.creds.registered
