@@ -250,6 +250,145 @@ function downloadYoutubeVideoBuffer(
 }
 
 // ======================================================
+// AI AUTO-REPLY CONFIG (PRO)
+// ======================================================
+//
+// AI_API_KEY is a Claude API key from platform.claude.com/settings/keys
+// (Render env var). Without it, AI auto-reply throws a clear error
+// instead of silently doing nothing when someone enables it.
+//
+// This is a single-turn call — no conversation memory across
+// messages, just "here's the incoming text, give me a reply".
+// Simple and cheap by design; a stateful version (remembering the
+// last few messages per contact) is a natural future upgrade but
+// adds real complexity (per-chat history storage, trimming, etc.)
+// that's out of scope here.
+// ======================================================
+
+const AI_API_KEY =
+  process.env.AI_API_KEY ||
+  null;
+
+const AI_MODEL =
+  process.env.AI_MODEL ||
+  "claude-haiku-4-5-20251001";
+
+const AI_MAX_TOKENS =
+  Number(
+    process.env.AI_MAX_TOKENS
+  ) || 300;
+
+function getAiSystemPrompt() {
+
+  return (
+    process.env.AI_SYSTEM_PROMPT ||
+    `You are a friendly, concise WhatsApp assistant replying on behalf of ${config.botname}'s owner. ` +
+    "Keep replies short (1-3 sentences), natural, and helpful. " +
+    "You are not the account owner and don't know their personal details unless told — don't pretend otherwise."
+  );
+}
+
+// ======================================================
+// GET AI REPLY
+// ======================================================
+
+async function getAiReply(
+  text
+) {
+
+  if (!AI_API_KEY) {
+
+    throw new Error(
+      "AI_API_KEY is not configured on the server."
+    );
+  }
+
+  const trimmedText =
+    String(text || "")
+      .slice(0, 4000)
+      .trim();
+
+  if (!trimmedText) {
+    return null;
+  }
+
+  const response =
+    await fetch(
+      "https://api.anthropic.com/v1/messages",
+      {
+        method: "POST",
+
+        headers: {
+
+          "x-api-key":
+            AI_API_KEY,
+
+          "anthropic-version":
+            "2023-06-01",
+
+          "content-type":
+            "application/json"
+
+        },
+
+        body: JSON.stringify({
+
+          model:
+            AI_MODEL,
+
+          max_tokens:
+            AI_MAX_TOKENS,
+
+          system:
+            getAiSystemPrompt(),
+
+          messages: [
+            {
+              role: "user",
+              content:
+                trimmedText
+            }
+          ]
+
+        })
+      }
+    );
+
+  if (!response.ok) {
+
+    const errorBody =
+      await response
+        .text()
+        .catch(
+          () => ""
+        );
+
+    throw new Error(
+      `AI API returned ${response.status}: ${errorBody.slice(0, 200)}`
+    );
+  }
+
+  const data =
+    await response.json();
+
+  const reply =
+    (data?.content || [])
+      .filter(
+        block =>
+          block?.type ===
+          "text"
+      )
+      .map(
+        block =>
+          block.text
+      )
+      .join("\n")
+      .trim();
+
+  return reply || null;
+}
+
+// ======================================================
 // REACTION LIST
 // ======================================================
 
@@ -2636,6 +2775,15 @@ function getSettableDefinitions() {
         "❤️ *Channel Auto React ENABLED* ✅\n\nThe bot will react to posts in channels it follows, where WhatsApp allows it.",
       offText:
         "❤️ *Channel Auto React DISABLED* ❌"
+    },
+
+    aireply: {
+      field: "aiReply",
+      feature: "aiReply",
+      onText:
+        "🤖 *AI Auto-Reply ENABLED* ✅\n\nThe bot will now use AI to automatically reply to incoming direct messages (not groups).",
+      offText:
+        "🤖 *AI Auto-Reply DISABLED* ❌"
     }
 
   };
@@ -2657,7 +2805,8 @@ const WEB_ADMIN_ALLOWED_SETTINGS = [
   "statusforward",
   "callreject",
   "welcome",
-  "channelreact"
+  "channelreact",
+  "aireply"
 ];
 
 // ======================================================
@@ -2804,6 +2953,9 @@ function createBotSession({
     channelReact:
       false,
 
+    aiReply:
+      false,
+
     welcomeMembers:
       true,
 
@@ -2930,6 +3082,11 @@ function buildMenu(
       ? "ON ✅"
       : "OFF ❌";
 
+  const aiReplyStatus =
+    bot?.aiReply
+      ? "ON ✅"
+      : "OFF ❌";
+
   const settingsAccess =
     senderIsOwner
       ? "OWNER — SETTINGS ENABLED ✅"
@@ -2978,6 +3135,7 @@ function buildMenu(
 ┃ 🔓 View-Once Reveal: ${viewOnceStatus} 🔒PRO
 ┃ 📵 Auto-Reject Calls: ${callRejectStatus} 🔒PRO
 ┃ ❤️ Channel Auto React: ${channelReactStatus} 🔒PRO
+┃ 🤖 AI Auto-Reply: ${aiReplyStatus} 🔒PRO
 ┃ 👋 Welcome Members: ${welcomeStatus}
 ┃
 ┃ Change with:
@@ -3022,6 +3180,7 @@ function buildSettingsHelp(
       line("View-Once Reveal 🔒PRO", "viewOnce"),
       line("Auto-Reject Calls 🔒PRO", "callReject"),
       line("Channel Auto React 🔒PRO", "channelReact"),
+      line("AI Auto-Reply 🔒PRO", "aiReply"),
       line("Welcome Members", "welcomeMembers")
     ].join("\n");
 
@@ -3034,6 +3193,7 @@ function buildSettingsHelp(
       "viewonce",
       "callreject",
       "channelreact",
+      "aireply",
       "welcome"
     ]
       .map(
@@ -4674,6 +4834,69 @@ async function startBotSession(
 
                   console.warn(
                     `⚠️ [${bot.phone}] Message reaction failed: ${error.message}`
+                  );
+
+                }
+
+              }
+
+              // ==================================================
+              // AI AUTO-REPLY (PRO)
+              // ==================================================
+              //
+              // Replies to incoming direct-message text using an
+              // AI model, for anyone other than the account
+              // connected to this session. Independent of
+              // autoReact — both can run together. Deliberately
+              // scoped to one-to-one chats only for now (skips
+              // @g.us groups) so it doesn't answer every message
+              // in a group conversation; and skips anything that
+              // starts with the bot's own command prefix so a
+              // failed command attempt from a non-owner doesn't
+              // get an AI reply instead of being silently ignored.
+
+              if (
+                !isFromMe &&
+                bot.aiReply &&
+                hasAccess(
+                  senderTier,
+                  "aiReply"
+                ) &&
+                !remoteJid.endsWith(
+                  "@g.us"
+                ) &&
+                !body.startsWith(
+                  config.prefix
+                )
+              ) {
+
+                try {
+
+                  const aiReplyText =
+                    await getAiReply(
+                      body
+                    );
+
+                  if (aiReplyText) {
+
+                    await safeSend(
+                      bot,
+                      remoteJid,
+                      {
+                        text:
+                          aiReplyText
+                      }
+                    );
+
+                    console.log(
+                      `🤖 [${bot.phone}] AI auto-replied to ${remoteJid}`
+                    );
+                  }
+
+                } catch (error) {
+
+                  console.warn(
+                    `⚠️ [${bot.phone}] AI auto-reply failed: ${error.message}`
                   );
 
                 }
