@@ -1128,6 +1128,179 @@ function initializePaystackTransaction(
 }
 
 // ======================================================
+// NOTIFY PRO UPGRADE
+// ======================================================
+//
+// Shared by the Paystack webhook AND the manual admin
+// upgrade endpoint (/api/admin/upgrade-customer), so both
+// paths behave identically: activate the subscription, tell
+// the customer (with the owner's number included as a help
+// contact), and let the owner know a new PRO subscriber came
+// in. The subscription itself is already committed via
+// upgradeTier() before either WhatsApp message is attempted,
+// so a failure sending one notification never undoes the
+// upgrade or blocks the other message.
+// ======================================================
+
+async function notifyProUpgrade(
+  phone,
+  days,
+  source
+) {
+
+  const cleanPhone =
+    normalizePhone(
+      phone
+    );
+
+  if (!cleanPhone) {
+
+    throw new Error(
+      "Invalid customer phone number."
+    );
+  }
+
+  const jid =
+    phoneToJid(
+      cleanPhone
+    );
+
+  const result =
+    upgradeTier(
+      jid,
+      TIERS.PRO,
+      days
+    );
+
+  console.log("");
+  console.log(
+    "========================================"
+  );
+  console.log(
+    `⭐ PRO ACTIVATED (${source})`
+  );
+  console.log(
+    "========================================"
+  );
+  console.log(
+    `📞 Customer: ${cleanPhone}`
+  );
+  console.log(
+    `⭐ Tier: ${result.tier}`
+  );
+  console.log(
+    `📅 Days: ${days}`
+  );
+  console.log(
+    `⏰ Expires: ${
+      new Date(
+        result.expiresAt
+      ).toISOString()
+    }`
+  );
+  console.log(
+    "========================================"
+  );
+
+  const ownerPhone =
+    getOwnerPhone();
+
+  // --------------------------------------------------
+  // NOTIFY THE CUSTOMER
+  // --------------------------------------------------
+
+  const customerBot =
+    findBotForPhone(
+      cleanPhone
+    );
+
+  if (
+    customerBot &&
+    customerBot.isConnected
+  ) {
+
+    try {
+
+      await safeSend(
+        customerBot,
+        jid,
+        {
+          text:
+            "🎉 *PAYMENT SUCCESSFUL!*\n\n" +
+            "⭐ You are now on the PRO plan.\n" +
+            `📅 Duration: ${days} days.\n\n` +
+            `Try ${config.prefix}quote now! 🚀\n\n` +
+            `📞 Need help? Contact the bot owner: wa.me/${ownerPhone}`
+        }
+      );
+
+    } catch (error) {
+
+      console.warn(
+        "⚠️ Could not send customer PRO-activation message:",
+        error.message
+      );
+    }
+
+  } else {
+
+    console.log(
+      `ℹ️ Customer ${cleanPhone} is not currently connected. Subscription was still activated — they'll have PRO access next time they use the bot.`
+    );
+  }
+
+  // --------------------------------------------------
+  // NOTIFY THE OWNER
+  // --------------------------------------------------
+
+  const ownerBot =
+    findBotForPhone(
+      ownerPhone
+    );
+
+  if (
+    ownerBot &&
+    ownerBot.isConnected
+  ) {
+
+    try {
+
+      await safeSend(
+        ownerBot,
+        ownerBot.jid,
+        {
+          text:
+            "⭐ *New PRO Subscriber!*\n\n" +
+            `📞 Customer: ${cleanPhone}\n` +
+            `📅 Duration: ${days} days\n` +
+            `⏰ Expires: ${
+              new Date(
+                result.expiresAt
+              ).toLocaleString()
+            }\n` +
+            `🔔 Source: ${source}`
+        }
+      );
+
+    } catch (error) {
+
+      console.warn(
+        "⚠️ Could not send owner PRO-notification message:",
+        error.message
+      );
+    }
+
+  } else {
+
+    console.log(
+      "ℹ️ Owner bot is not currently connected — skipped owner notification."
+    );
+  }
+
+  return result;
+}
+
+// ======================================================
 // FIND BOT SESSION
 // ======================================================
 
@@ -2242,88 +2415,13 @@ app.post(
             .sendStatus(200);
         }
 
-        const jid =
-          phoneToJid(
-            cleanPhone
-          );
-
         try {
 
-          const result =
-            upgradeTier(
-              jid,
-              TIERS.PRO,
-              days
-            );
-
-          console.log("");
-          console.log(
-            "========================================"
+          await notifyProUpgrade(
+            cleanPhone,
+            days,
+            "Paystack webhook"
           );
-          console.log(
-            "💳 PAYMENT SUCCESSFUL"
-          );
-          console.log(
-            "========================================"
-          );
-          console.log(
-            `📞 Customer: ${cleanPhone}`
-          );
-          console.log(
-            `⭐ Tier: ${result.tier}`
-          );
-          console.log(
-            `📅 Days: ${days}`
-          );
-          console.log(
-            `⏰ Expires: ${
-              new Date(
-                result.expiresAt
-              ).toISOString()
-            }`
-          );
-          console.log(
-            "========================================"
-          );
-
-          const customerBot =
-            findBotForPhone(
-              cleanPhone
-            );
-
-          if (
-            customerBot &&
-            customerBot.isConnected
-          ) {
-
-            try {
-
-              await safeSend(
-                customerBot,
-                jid,
-                {
-                  text:
-                    "🎉 *PAYMENT SUCCESSFUL!*\n\n" +
-                    "⭐ You are now on the PRO plan.\n" +
-                    `📅 Duration: ${days} days.\n\n` +
-                    `Try ${config.prefix}quote now! 🚀`
-                }
-              );
-
-            } catch (error) {
-
-              console.warn(
-                "⚠️ Could not send payment confirmation:",
-                error.message
-              );
-            }
-
-          } else {
-
-            console.log(
-              `ℹ️ Customer ${cleanPhone} is not currently connected. Subscription was still activated.`
-            );
-          }
 
         } catch (error) {
 
@@ -2758,6 +2856,107 @@ app.post(
           error:
             error.message ||
             "Failed to delete session."
+        });
+    }
+  }
+);
+
+// ======================================================
+// ADMIN: MANUALLY UPGRADE A CUSTOMER TO PRO
+// ======================================================
+//
+// For when a payment succeeded but, for whatever reason (a
+// misconfigured or unreachable Paystack webhook, a signature
+// mismatch, etc), the automatic upgrade in /webhook/payment
+// never fired. Runs through the exact same notifyProUpgrade
+// helper the webhook uses, so the customer and owner get the
+// same messages either way. Protected by ADMIN_KEY like the
+// other admin endpoints.
+// ======================================================
+
+app.post(
+  "/api/admin/upgrade-customer",
+  async (req, res) => {
+
+    try {
+
+      const adminKey =
+        process.env.ADMIN_KEY;
+
+      if (!adminKey) {
+
+        return res
+          .status(500)
+          .json({
+            error:
+              "ADMIN_KEY is not configured on the server."
+          });
+      }
+
+      if (
+        req.headers["x-admin-key"] !==
+        adminKey
+      ) {
+
+        return res
+          .status(401)
+          .json({
+            error:
+              "Unauthorized."
+          });
+      }
+
+      const phone =
+        normalizePhone(
+          req.body?.phone
+        );
+
+      if (!phone) {
+
+        return res
+          .status(400)
+          .json({
+            error:
+              "Provide a valid phone number."
+          });
+      }
+
+      const days =
+        Number(
+          req.body?.days
+        ) || 30;
+
+      const result =
+        await notifyProUpgrade(
+          phone,
+          days,
+          "manual admin upgrade"
+        );
+
+      return res
+        .status(200)
+        .json({
+          success: true,
+          phone,
+          tier:
+            result.tier,
+          expiresAt:
+            result.expiresAt
+        });
+
+    } catch (error) {
+
+      console.error(
+        "❌ Admin manual-upgrade error:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          error:
+            error.message ||
+            "Failed to upgrade customer."
         });
     }
   }
